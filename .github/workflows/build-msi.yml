@@ -1,0 +1,64 @@
+name: Build MSI installers
+
+# cx_Freeze bundles the interpreter and native winrt extension modules, which
+# are architecture-specific, so each MSI must be built on its target
+# architecture - there is no cross-compilation.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: ${{ matrix.arch }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install cx_Freeze
+
+      - name: Build MSI
+        run: python setup_msi.py bdist_msi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-${{ matrix.arch }}
+          path: dist/*.msi
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.msi

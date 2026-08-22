@@ -17,7 +17,22 @@ the module docstring in `control_galcon.py` for full protocol notes.
   countdown timers, and a program editor (weekly/cyclic, per-window
   enable/disable, hour/minute dropdowns).
 
-## Requirements
+## Install
+
+### Option 1: MSI installer (recommended)
+
+Download the MSI for your architecture from the
+[Releases](https://github.com/nightime7/py-galcon-bt-control/releases) page
+and run it. Python does **not** need to be installed - the MSI bundles its
+own interpreter and all dependencies.
+
+The installer adds Start Menu and Desktop shortcuts for the GUI, and also
+installs `galcon-cli.exe` alongside it for command-line use.
+
+Pick `x64` for a normal Intel/AMD PC, or `arm64` for an ARM-based Windows
+device (e.g. Snapdragon-powered laptops).
+
+### Option 2: Run from source
 
 - Windows with Bluetooth LE support
 - Python 3.10+
@@ -33,6 +48,13 @@ Create it by running:
 
 ```powershell
 python control_galcon.py --set-pin 1234
+```
+
+If you installed via the MSI, use the bundled CLI instead (run it from the
+install folder, e.g. `C:\Program Files\Galcon GL6100 Control`):
+
+```powershell
+.\galcon-cli.exe --set-pin 1234
 ```
 
 This is the PIN shown on the controller's display the first time it was
@@ -69,6 +91,19 @@ For the GUI:
 ```powershell
 python galcon_gui.py
 ```
+
+## Building the installer
+
+```powershell
+pip install cx_Freeze
+python setup_msi.py bdist_msi
+```
+
+The MSI lands in `dist/`. cx_Freeze bundles the interpreter and the
+architecture-specific native modules that `bleak` depends on, so it cannot
+cross-compile: an x64 Python produces an x64 MSI, an ARM64 Python produces
+an ARM64 MSI. The GitHub Actions workflow in `.github/workflows/build-msi.yml`
+builds both on their respective runners when a `v*` tag is pushed.
 
 ## research/
 

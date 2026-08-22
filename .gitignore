@@ -7,6 +7,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Installer build output
+build/
+dist/
+*.msi
+*.egg-info/
+
 # Editor/OS
 .vscode/
 desktop.ini
