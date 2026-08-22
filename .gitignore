@@ -1,0 +1,12 @@
+# Device-specific data - PIN and (optional) MAC address for your controller.
+# See galcon_device.example.json for the template.
+galcon_device.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/OS
+.vscode/
+desktop.ini
