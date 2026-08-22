@@ -36,6 +36,8 @@ from control_galcon import (
 
 DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 WINDOW_POSITIONS = (5, 7, 9, 11)
+ZONE_IDLE_COLOR = "#9ca3af"
+ZONE_ACTIVE_COLOR = "#16a34a"
 
 
 async def find_device_for_gui(scan_time, log, mac=None):
@@ -370,17 +372,18 @@ class GalconGui(tk.Tk):
 
     def _build_style(self):
         style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TFrame", background="#f4f1eb")
-        style.configure("Panel.TFrame", background="#ffffff", relief="solid", borderwidth=1)
-        style.configure("TLabel", background="#f4f1eb", foreground="#1f2933")
-        style.configure("Panel.TLabel", background="#ffffff", foreground="#1f2933")
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18), background="#f4f1eb")
-        style.configure("Status.TLabel", font=("Segoe UI", 10), background="#f4f1eb")
-        style.configure("Zone.TLabelframe", background="#ffffff")
-        style.configure("Zone.TLabelframe.Label", font=("Segoe UI Semibold", 11))
-        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10))
-        style.configure("Treeview", rowheight=28)
+        # Prefer the native Windows themes so every section shares the OS
+        # background instead of mixing custom greys and whites.
+        for theme in ("vista", "winnative", "clam"):
+            if theme in style.theme_names():
+                style.theme_use(theme)
+                break
+        self.theme_bg = style.lookup("TFrame", "background") or self.cget("background")
+        self.configure(background=self.theme_bg)
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 16))
+        style.configure("Status.TLabel", font=("Segoe UI", 9))
+        style.configure("Accent.TButton", font=("Segoe UI Semibold", 9))
+        style.configure("Countdown.TLabel", font=("Segoe UI Semibold", 13))
 
     def _connected_widget(self, widget):
         self.connected_controls.append(widget)
@@ -396,7 +399,7 @@ class GalconGui(tk.Tk):
 
         top = ttk.Frame(self, padding=14)
         top.grid(row=0, column=0, sticky="ew")
-        top.columnconfigure(6, weight=1)
+        top.columnconfigure(7, weight=1)
         ttk.Label(top, text="Galcon GL6100", style="Title.TLabel").grid(row=0, column=0, padx=(0, 18))
         ttk.Label(top, text="Scan").grid(row=0, column=1, sticky="e")
         self.scan_var = tk.DoubleVar(value=60.0)
@@ -404,15 +407,15 @@ class GalconGui(tk.Tk):
         ttk.Label(top, text="PIN").grid(row=0, column=3, sticky="e")
         self.pin_var = tk.StringVar(value=load_saved_pin() or "")
         ttk.Entry(top, width=10, textvariable=self.pin_var, show="*").grid(row=0, column=4, padx=6)
+        ttk.Button(top, text="Save PIN", command=self._save_pin).grid(row=0, column=5, padx=(0, 6))
         self.send_pin_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="send PIN", variable=self.send_pin_var).grid(row=0, column=5, padx=6)
+        ttk.Checkbutton(top, text="send PIN", variable=self.send_pin_var).grid(row=0, column=6, padx=6)
         self.debug_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="debug", variable=self.debug_var).grid(row=0, column=6, sticky="w", padx=6)
+        ttk.Checkbutton(top, text="debug", variable=self.debug_var).grid(row=0, column=7, sticky="w", padx=6)
         self.connect_button = ttk.Button(top, text="Connect", style="Accent.TButton", command=self._connect)
-        self.connect_button.grid(row=0, column=7, padx=6)
+        self.connect_button.grid(row=0, column=8, padx=6)
         self.disconnect_button = ttk.Button(top, text="Disconnect", command=self._disconnect, state="disabled")
-        self.disconnect_button.grid(row=0, column=8, padx=6)
-        ttk.Button(top, text="Save PIN", command=self._save_pin).grid(row=0, column=9, padx=(6, 0))
+        self.disconnect_button.grid(row=0, column=9, padx=6)
 
         top2 = ttk.Frame(self, padding=(14, 0, 14, 8))
         top2.grid(row=1, column=0, sticky="ew")
@@ -435,7 +438,7 @@ class GalconGui(tk.Tk):
         body.columnconfigure(1, weight=4)
         body.rowconfigure(1, weight=1)
 
-        zones_frame = ttk.LabelFrame(body, text="Zones", style="Zone.TLabelframe", padding=6)
+        zones_frame = ttk.LabelFrame(body, text="Zones", padding=8)
         zones_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=(0, 10))
         for index in range(4):
             zones_frame.columnconfigure(index, weight=1)
@@ -461,7 +464,7 @@ class GalconGui(tk.Tk):
         ttk.Spinbox(actions, from_=0, to=99, textvariable=self.rainoff_var, width=9).grid(row=2, column=1, sticky="w", padx=4, pady=4)
         self._connected_widget(ttk.Button(actions, text="Apply",
                           command=self._set_rainoff)).grid(row=2, column=2, padx=4, pady=4, sticky="ew")
-        self.log_text = tk.Text(actions, height=7, wrap="word", relief="solid", bd=1)
+        self.log_text = tk.Text(actions, height=7, wrap="word", relief="sunken", bd=1)
         self.log_text.grid(row=3, column=0, columnspan=6, sticky="nsew", pady=(10, 0))
         actions.rowconfigure(3, weight=1)
 
@@ -507,50 +510,32 @@ class GalconGui(tk.Tk):
             self.weekly_frame.columnconfigure(idx, weight=1)
             label_var = tk.StringVar(value=f"  {name}")
             self.day_label_vars.append(label_var)
-            checkbutton = tk.Checkbutton(self.weekly_frame, textvariable=label_var,
-                                         variable=self.day_vars[idx],
-                                         indicatoron=False, width=8,
-                                         command=self._sync_day_labels,
-                                         bg="#ffffff", selectcolor="#dbeafe",
-                                         relief="raised", overrelief="ridge")
+            checkbutton = ttk.Checkbutton(self.weekly_frame, textvariable=label_var,
+                                          variable=self.day_vars[idx],
+                                          style="Toolbutton",
+                                          command=self._sync_day_labels)
             checkbutton.grid(row=0, column=idx, padx=3, sticky="ew")
             self.day_checkbuttons.append(checkbutton)
             self.weekly_controls.append(checkbutton)
 
-        self.cyclic_frame = ttk.LabelFrame(programs, text="Cyclic Schedule", padding=8)
+        self.cyclic_frame = ttk.LabelFrame(programs, text="Cyclic Schedule", padding=10)
         self.cyclic_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        for col in range(8):
-            self.cyclic_frame.columnconfigure(col, weight=1)
-        ttk.Label(self.cyclic_frame, text="Start offset (days)").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.cyclic_frame.columnconfigure(1, weight=1)
         self.start_in_var = tk.IntVar(value=0)
-        start_in_spin = ttk.Combobox(self.cyclic_frame, width=8,
-                                     state="readonly",
-                                     values=tuple(range(0, 15)),
-                                     textvariable=self.start_in_var)
-        start_in_spin.grid(row=0, column=1, sticky="w", padx=(0, 18))
-        self.cyclic_controls.append(start_in_spin)
-        ttk.Label(self.cyclic_frame, text="Cadence (days)").grid(row=0, column=2, sticky="w", padx=(0, 8))
         self.cadence_var = tk.IntVar(value=1)
-        cadence_spin = ttk.Combobox(self.cyclic_frame, width=8,
-                                    state="readonly",
-                                    values=tuple(range(1, 15)),
-                                    textvariable=self.cadence_var)
-        cadence_spin.grid(row=0, column=3, sticky="w", padx=(0, 18))
-        self.cyclic_controls.append(cadence_spin)
-        ttk.Label(self.cyclic_frame, text="Start hour").grid(row=0, column=4, sticky="w", padx=(0, 8))
-        cyclic_hour = ttk.Combobox(self.cyclic_frame, width=8,
-                                   state="readonly",
-                                   values=tuple(range(0, 24)),
-                                   textvariable=self.cyclic_hour_var)
-        cyclic_hour.grid(row=0, column=5, sticky="w", padx=(0, 18))
-        self.cyclic_controls.append(cyclic_hour)
-        ttk.Label(self.cyclic_frame, text="Start minute").grid(row=0, column=6, sticky="w", padx=(0, 8))
-        cyclic_minute = ttk.Combobox(self.cyclic_frame, width=8,
-                                     state="readonly",
-                                     values=tuple(range(0, 60, 5)),
-                                     textvariable=self.cyclic_minute_var)
-        cyclic_minute.grid(row=0, column=7, sticky="w")
-        self.cyclic_controls.append(cyclic_minute)
+        cyclic_fields = (
+            ("Start offset (days)", self.start_in_var, tuple(range(0, 15))),
+            ("Cadence (days)", self.cadence_var, tuple(range(1, 15))),
+            ("Start hour", self.cyclic_hour_var, tuple(range(0, 24))),
+            ("Start minute", self.cyclic_minute_var, tuple(range(0, 60, 5))),
+        )
+        for row, (text, var, values) in enumerate(cyclic_fields):
+            ttk.Label(self.cyclic_frame, text=text).grid(
+                row=row, column=0, sticky="w", padx=(0, 14), pady=4)
+            box = ttk.Combobox(self.cyclic_frame, width=10, state="readonly",
+                               values=values, textvariable=var)
+            box.grid(row=row, column=1, sticky="w", pady=4)
+            self.cyclic_controls.append(box)
 
         self.windows_frame = ttk.LabelFrame(programs, text="Weekly Windows", padding=8)
         self.windows_frame.grid(row=3, column=0, sticky="ew")
@@ -591,28 +576,25 @@ class GalconGui(tk.Tk):
             minute_box.pack(side="left")
             self.window_time_controls.append((hour_box, minute_box))
 
-        self.program_status_var = tk.StringVar(value="Refresh programs to load zone data.")
-        ttk.Label(programs, textvariable=self.program_status_var).grid(row=4, column=0, sticky="nw", pady=(12, 0))
-
     def _build_zone_card(self, parent, zone, column):
-        frame = ttk.Frame(parent, style="Panel.TFrame", padding=7)
-        frame.grid(row=0, column=column, sticky="nsew", padx=3)
+        frame = ttk.LabelFrame(parent, text=f"Zone {zone}", padding=8)
+        frame.grid(row=0, column=column, sticky="nsew", padx=4)
         frame.columnconfigure(0, weight=1)
-        canvas = tk.Canvas(frame, width=38, height=38, bg="#ffffff", highlightthickness=0)
-        indicator = canvas.create_oval(7, 7, 31, 31, fill="#9ca3af", outline="")
+        canvas = tk.Canvas(frame, width=34, height=34, highlightthickness=0,
+                           bg=self.theme_bg)
+        indicator = canvas.create_oval(5, 5, 29, 29, fill=ZONE_IDLE_COLOR, outline="")
         canvas.grid(row=0, column=0, pady=(0, 2))
-        ttk.Label(frame, text=f"Zone {zone}", style="Panel.TLabel", font=("Segoe UI Semibold", 10)).grid(row=1, column=0)
-        state_label = ttk.Label(frame, text="Idle", style="Panel.TLabel")
-        state_label.grid(row=2, column=0, pady=(4, 0))
-        countdown_label = ttk.Label(frame, text="--:--", style="Panel.TLabel", font=("Segoe UI Semibold", 12))
-        countdown_label.grid(row=3, column=0, pady=(2, 5))
+        state_label = ttk.Label(frame, text="Idle")
+        state_label.grid(row=1, column=0)
+        countdown_label = ttk.Label(frame, text="--:--", style="Countdown.TLabel")
+        countdown_label.grid(row=2, column=0, pady=(2, 6))
         minutes_var = tk.IntVar(value=1)
-        row = ttk.Frame(frame, style="Panel.TFrame")
-        row.grid(row=4, column=0, pady=(0, 5))
-        ttk.Label(row, text="min", style="Panel.TLabel").pack(side="left")
+        row = ttk.Frame(frame)
+        row.grid(row=3, column=0, pady=(0, 6))
+        ttk.Label(row, text="min").pack(side="left")
         ttk.Spinbox(row, from_=1, to=600, width=5, textvariable=minutes_var).pack(side="left", padx=3)
-        button_row = ttk.Frame(frame, style="Panel.TFrame")
-        button_row.grid(row=5, column=0, sticky="ew")
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=4, column=0, sticky="ew")
         open_button = self._connected_widget(ttk.Button(
             button_row, text="Open", command=lambda z=zone: self._open_zone(z)))
         open_button.pack(side="left", expand=True, fill="x", padx=(0, 3))
@@ -759,7 +741,7 @@ class GalconGui(tk.Tk):
         remaining = self._current_remaining()
         for zone, widgets in self.zone_widgets.items():
             active = zone == self.active_zone and remaining > 0
-            color = "#16a34a" if active else "#9ca3af"
+            color = ZONE_ACTIVE_COLOR if active else ZONE_IDLE_COLOR
             widgets["canvas"].itemconfigure(widgets["indicator"], fill=color)
             widgets["state"].configure(text="Running" if active else "Idle")
             widgets["countdown"].configure(text=self._format_duration(remaining) if active else "--:--")
@@ -771,13 +753,6 @@ class GalconGui(tk.Tk):
 
     def _render_programs(self):
         self._load_program(int(self.edit_zone_var.get()))
-
-    def _format_mode(self, record):
-        days = record[4]
-        if days & 0x80:
-            return f"cyclic +{record[13] - 0x80}d / every {record[14] - 0xC0}d"
-        active = [DAY_NAMES[idx] for idx in range(7) if days & (1 << idx)]
-        return ",".join(active) if active else "off"
 
     def _format_window(self, hour, minute):
         if hour == 0xff:
@@ -792,8 +767,7 @@ class GalconGui(tk.Tk):
     def _load_program(self, zone):
         record = self.program_records.get(zone)
         if not record:
-            self.program_status_var.set(
-                f"Zone {zone} has not been loaded yet. Click Refresh.")
+            self._log(f"[{ts()}] Zone {zone} not loaded yet - click Refresh.")
             return
         self.edit_zone_var.set(zone)
         self.edit_duration_var.set(record[1] * 60 + record[2])
@@ -817,7 +791,6 @@ class GalconGui(tk.Tk):
                 self.window_hour_vars[idx].set(0)
                 self.window_minute_vars[idx].set(0)
             self._sync_window_enabled(idx)
-        self.program_status_var.set(f"Zone {zone}: {self._format_mode(record)}")
         self._sync_day_labels()
         self._sync_mode_controls()
 
