@@ -32,6 +32,27 @@ installs `galcon-cli.exe` alongside it for command-line use.
 Pick `x64` for a normal Intel/AMD PC, or `arm64` for an ARM-based Windows
 device (e.g. Snapdragon-powered laptops).
 
+#### "Unknown publisher" warning
+
+The MSI is **not code-signed**, so Windows will show an *Unknown publisher*
+prompt (and possibly a SmartScreen "Windows protected your PC" screen). This
+is expected. Code-signing certificates are issued by commercial CAs and are
+not free, and a self-signed certificate would not help - it only suppresses
+the warning on machines that have explicitly been told to trust it.
+
+To proceed: click **More info** then **Run anyway**.
+
+If you would rather not trust an unsigned installer, use
+[Option 2](#option-2-run-from-source) and run from source instead - the code
+is all here and readable.
+
+To verify a download actually came from this repository, compare its hash
+against the checksums published in the release notes:
+
+```powershell
+Get-FileHash .\GalconGL6100Control-1.1.0-x64.msi -Algorithm SHA256
+```
+
 ### Option 2: Run from source
 
 - Windows with Bluetooth LE support
