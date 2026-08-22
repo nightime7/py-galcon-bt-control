@@ -21,7 +21,10 @@ from pathlib import Path
 
 from cx_Freeze import Executable, setup
 
-VERSION = "1.1.0"
+sys.path.insert(0, str(Path(__file__).parent))
+from control_galcon import APP_VERSION  # noqa: E402
+
+VERSION = APP_VERSION
 PRODUCT_NAME = "Galcon GL6100 Control"
 SHORTCUT_NAME = "Galcon GL6100 Control"
 

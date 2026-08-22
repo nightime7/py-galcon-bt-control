@@ -1,18 +1,26 @@
 import asyncio
+import json
 import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+import urllib.error
+import urllib.request
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from bleak import BleakClient, BleakScanner
 
 from control_galcon import (
+    APP_VERSION,
     CHAR_COMMAND,
     CHAR_PIN,
     CHAR_POLL,
     CHAR_STATUS,
     CHAR_VALVE,
+    GITHUB_REPO,
     NAME_HINT,
     REPAIR_HINT,
     SERVICE_UUID,
@@ -38,6 +46,15 @@ DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 WINDOW_POSITIONS = (5, 7, 9, 11)
 ZONE_IDLE_COLOR = "#9ca3af"
 ZONE_ACTIVE_COLOR = "#16a34a"
+
+
+def _version_tuple(text):
+    """Loose version parse so tags like 'v1.2.0-beta' still compare sanely."""
+    parts = []
+    for chunk in str(text).split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 async def find_device_for_gui(scan_time, log, mac=None):
@@ -314,6 +331,11 @@ class GalconSession:
         finally:
             self.ui_queue.put(("busy", False))
 
+    async def save_programs(self, records):
+        # Sequential on purpose: concurrent GATT writes on one link interleave.
+        for zone in sorted(records):
+            await self.save_program(zone, records[zone])
+
     async def set_seasonal(self, percent):
         client = self._require_client()
         self.ui_queue.put(("busy", True))
@@ -361,6 +383,7 @@ class GalconGui(tk.Tk):
         self.cyclic_hour_var = tk.IntVar(value=6)
         self.cyclic_minute_var = tk.IntVar(value=0)
         self._build_style()
+        self._build_menu()
         self._build_ui()
         self._sync_day_labels()
         self._sync_mode_controls()
@@ -388,6 +411,51 @@ class GalconGui(tk.Tk):
     def _connected_widget(self, widget):
         self.connected_controls.append(widget)
         return widget
+
+    def _build_menu(self):
+        menubar = tk.Menu(self)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Export Configuration...",
+                              command=self._export_config)
+        file_menu.add_command(label="Import Configuration...",
+                              command=self._import_config)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Undo", accelerator="Ctrl+Z",
+                              command=lambda: self._edit_event("<<Undo>>"))
+        edit_menu.add_command(label="Redo", accelerator="Ctrl+Y",
+                              command=lambda: self._edit_event("<<Redo>>"))
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Cut", accelerator="Ctrl+X",
+                              command=lambda: self._edit_event("<<Cut>>"))
+        edit_menu.add_command(label="Copy", accelerator="Ctrl+C",
+                              command=lambda: self._edit_event("<<Copy>>"))
+        edit_menu.add_command(label="Paste", accelerator="Ctrl+V",
+                              command=lambda: self._edit_event("<<Paste>>"))
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Check for Updates...",
+                              command=self._check_updates)
+        help_menu.add_separator()
+        help_menu.add_command(label="About", command=self._show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+        self.config(menu=menubar)
+
+    def _edit_event(self, event):
+        """Route an edit action to whichever widget currently has focus."""
+        widget = self.focus_get()
+        if widget is None:
+            return
+        try:
+            widget.event_generate(event)
+        except tk.TclError:
+            pass
 
     def _set_widget_state(self, widgets, state):
         for widget in widgets:
@@ -464,7 +532,8 @@ class GalconGui(tk.Tk):
         ttk.Spinbox(actions, from_=0, to=99, textvariable=self.rainoff_var, width=9).grid(row=2, column=1, sticky="w", padx=4, pady=4)
         self._connected_widget(ttk.Button(actions, text="Apply",
                           command=self._set_rainoff)).grid(row=2, column=2, padx=4, pady=4, sticky="ew")
-        self.log_text = tk.Text(actions, height=7, wrap="word", relief="sunken", bd=1)
+        self.log_text = tk.Text(actions, height=7, wrap="word", relief="sunken",
+                                bd=1, undo=True)
         self.log_text.grid(row=3, column=0, columnspan=6, sticky="nsew", pady=(10, 0))
         actions.rowconfigure(3, weight=1)
 
@@ -659,6 +728,222 @@ class GalconGui(tk.Tk):
         save_mac(mac)
         self._log(f"[{ts()}] MAC saved")
 
+    def _export_config(self):
+        if not any(self.program_records.values()):
+            if not messagebox.askyesno(
+                    "No programs loaded",
+                    "No zone programs have been read from the controller yet, "
+                    "so the export will contain device settings only.\n\n"
+                    "Export anyway?"):
+                return
+
+        path = filedialog.asksaveasfilename(
+            title="Export configuration",
+            defaultextension=".json",
+            initialfile=f"galcon-config-{datetime.now():%Y%m%d}.json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        payload = {
+            "_comment": "Galcon GL6100 configuration backup. Contains the "
+                        "controller PIN - do not share this file.",
+            "app_version": APP_VERSION,
+            "exported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "device": {
+                "pin": self.pin_var.get().strip(),
+                "mac": self.mac_var.get().strip(),
+            },
+            "zones": {
+                str(zone): bytes(record).hex()
+                for zone, record in sorted(self.program_records.items())
+                if record
+            },
+        }
+
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+
+        self._log(f"[{ts()}] Configuration exported to {path}")
+        messagebox.showinfo(
+            "Export complete",
+            f"Configuration saved to:\n{path}\n\n"
+            "This file contains your controller PIN - keep it private.")
+
+    def _import_config(self):
+        path = filedialog.askopenfilename(
+            title="Import configuration",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Import failed", f"Could not read the file:\n{exc}")
+            return
+        if not isinstance(payload, dict):
+            messagebox.showerror("Import failed",
+                                 "That file is not a Galcon configuration backup.")
+            return
+
+        try:
+            records = self._parse_imported_zones(payload.get("zones") or {})
+        except ValueError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+
+        device = payload.get("device") or {}
+        if isinstance(device, dict):
+            pin = str(device.get("pin") or "").strip()
+            mac = str(device.get("mac") or "").strip()
+            if pin:
+                self.pin_var.set(pin)
+            if mac:
+                self.mac_var.set(mac)
+
+        if records:
+            self.program_records.update(records)
+            self._load_program(int(self.edit_zone_var.get()))
+
+        self._log(f"[{ts()}] Configuration imported from {path}")
+
+        if not records:
+            messagebox.showinfo(
+                "Import complete",
+                "Device settings were loaded. The file contained no zone programs.")
+            return
+
+        if not self.connected:
+            messagebox.showinfo(
+                "Import complete",
+                f"Loaded {len(records)} zone program(s) into the editor.\n\n"
+                "Connect to the controller, then use Save Zone Program to "
+                "write them to the device.")
+            return
+
+        if messagebox.askyesno(
+                "Write to controller?",
+                f"Loaded {len(records)} zone program(s).\n\n"
+                "Write them to the controller now?\n"
+                "This overwrites the existing schedules on those zones."):
+            self._connected_call(self.session.save_programs(records))
+
+    def _parse_imported_zones(self, zones):
+        if not isinstance(zones, dict):
+            raise ValueError("The 'zones' section is malformed.")
+        records = {}
+        for key, value in zones.items():
+            try:
+                zone = int(key)
+                record = bytes.fromhex(str(value))
+            except (TypeError, ValueError):
+                raise ValueError(f"Zone {key} contains invalid data.") from None
+            if not 1 <= zone <= 4:
+                raise ValueError(f"Zone {key} is outside the valid range 1-4.")
+            if len(record) != 20:
+                raise ValueError(
+                    f"Zone {key} has {len(record)} bytes; expected 20.")
+            records[zone] = record
+        return records
+
+    def _check_updates(self):
+        self._log(f"[{ts()}] Checking for updates...")
+        threading.Thread(target=self._fetch_latest_release, daemon=True).start()
+
+    def _fetch_latest_release(self):
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"GalconGL6100Control/{APP_VERSION}",
+            })
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ("No published releases were found."
+                      if exc.code == 404 else f"GitHub returned HTTP {exc.code}.")
+            self.ui_queue.put(("update_error", detail))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.ui_queue.put(("update_error", f"{type(exc).__name__}: {exc}"))
+            return
+
+        self.ui_queue.put(("update_result", {
+            "tag": str(data.get("tag_name") or "").lstrip("vV"),
+            "url": data.get("html_url")
+            or f"https://github.com/{GITHUB_REPO}/releases",
+        }))
+
+    def _handle_update_result(self, info):
+        latest = info.get("tag") or ""
+        url = info.get("url")
+        if not latest:
+            self._log(f"[{ts()}] Update check: no version reported")
+            messagebox.showwarning(
+                "Check for Updates",
+                "The latest release did not report a version number.")
+            return
+
+        if _version_tuple(latest) > _version_tuple(APP_VERSION):
+            self._log(f"[{ts()}] Update available: {latest}")
+            if messagebox.askyesno(
+                    "Update available",
+                    f"A newer version is available.\n\n"
+                    f"Installed: {APP_VERSION}\nLatest: {latest}\n\n"
+                    "Open the download page?"):
+                webbrowser.open(url)
+        else:
+            self._log(f"[{ts()}] Up to date ({APP_VERSION})")
+            messagebox.showinfo(
+                "Check for Updates",
+                f"You are running the latest version ({APP_VERSION}).")
+
+    def _show_about(self):
+        window = tk.Toplevel(self)
+        window.title("About Galcon GL6100 Control")
+        window.transient(self)
+        window.resizable(False, False)
+
+        frame = ttk.Frame(window, padding=18)
+        frame.grid(sticky="nsew")
+        ttk.Label(frame, text="Galcon GL6100 Control",
+                  style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text=f"Version {APP_VERSION}").grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, wraplength=380, justify="left",
+                  text="Unofficial control tools for Galcon GL6100 / 6100BT "
+                       "DC4 Bluetooth LE irrigation valve controllers.").grid(
+            row=2, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(frame, wraplength=380, justify="left",
+                  text=f"Repository: github.com/{GITHUB_REPO}").grid(
+            row=3, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(frame, wraplength=380, justify="left",
+                  text="Licensed under the GNU General Public License v3.0.").grid(
+            row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, wraplength=380, justify="left",
+                  text="This project is not affiliated with, authorized by, or "
+                       "endorsed by Galcon. Use at your own risk.").grid(
+            row=5, column=0, sticky="w", pady=(8, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, sticky="ew", pady=(18, 0))
+        ttk.Button(buttons, text="Repository",
+                   command=lambda: webbrowser.open(
+                       f"https://github.com/{GITHUB_REPO}")).pack(side="left")
+        ttk.Button(buttons, text="License",
+                   command=lambda: webbrowser.open(
+                       "https://www.gnu.org/licenses/gpl-3.0.html")).pack(
+            side="left", padx=6)
+        ttk.Button(buttons, text="Close",
+                   command=window.destroy).pack(side="right")
+
+        window.grab_set()
+
     def _refresh_status(self):
         self._connected_call(self.session.read_status())
 
@@ -708,6 +993,13 @@ class GalconGui(tk.Tk):
             elif kind == "programs_patch":
                 self.program_records.update(payload)
                 self._render_programs()
+            elif kind == "update_result":
+                self._handle_update_result(payload)
+            elif kind == "update_error":
+                self._log(f"[{ts()}] Update check failed: {payload}")
+                messagebox.showerror(
+                    "Check for Updates",
+                    f"Could not check for updates.\n\n{payload}")
         self.after(100, self._process_queue)
 
     def _log(self, text):

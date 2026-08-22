@@ -124,6 +124,10 @@ from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
 
+# Single source of truth for the version; setup_msi.py and the GUI read this.
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "nightime7/py-galcon-bt-control"
+
 # The GL6100 advertises under this name regardless of which physical unit
 # it is, so matching on it alone is enough to find the controller. A saved
 # MAC address (see load_saved_mac/save_mac below) is only an optional
