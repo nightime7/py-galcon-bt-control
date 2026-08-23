@@ -24,7 +24,7 @@ from cx_Freeze import Executable, setup
 sys.path.insert(0, str(Path(__file__).parent))
 from control_galcon import APP_VERSION  # noqa: E402
 
-VERSION = APP_VERSION
+VERSION = "1.1.1"
 PRODUCT_NAME = "Galcon GL6100 Control"
 SHORTCUT_NAME = "Galcon GL6100 Control"
 
@@ -92,6 +92,10 @@ bdist_msi_options = {
     if ARCH_TAG != "x86"
     else rf"[ProgramFilesFolder]\{PRODUCT_NAME}",
     "output_name": f"GalconGL6100Control-{VERSION}-{ARCH_TAG}.msi",
+    "product_name": PRODUCT_NAME,
+    "license_file": str(ROOT / "LICENSE.rtf"),
+    "launch_on_finish": True,
+    "all_users": True,
     "data": {"Shortcut": shortcut_table},
     "summary_data": {
         "author": "nightime7",

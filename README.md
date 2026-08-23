@@ -29,6 +29,10 @@ own interpreter and all dependencies.
 The installer adds Start Menu and Desktop shortcuts for the GUI, and also
 installs `galcon-cli.exe` alongside it for command-line use.
 
+The installer uses the standard Windows MSI flow, including a GPL-3.0 license
+agreement page, an install-folder chooser, an all-users installation option,
+and a Launch on Finish checkbox.
+
 Pick `x64` for a normal Intel/AMD PC, or `arm64` for an ARM-based Windows
 device (e.g. Snapdragon-powered laptops).
 
