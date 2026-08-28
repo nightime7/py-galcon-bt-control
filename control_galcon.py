@@ -23,10 +23,11 @@ VALVE CONTROL (20900103) is a 20-byte frame:
            remaining bytes 0x00
 
 STATUS (20900102) is a 20-byte frame. byte0 is 0xff while idle. Active
-firmware variants use either 0xf0-0xf3 for one zone or a low-byte bitmask
-where bit0-bit3 represent zones 1-4. bytes[2:4] are [minutes][seconds]
-remaining. Reading 20900102 returns all zeros unless 02 00 was recently
-written to 20900106 first.
+firmware variants use 0xf0-0xf3 for one zone. When zones 1 and 2 run
+together, the observed compact form is byte0=0x01 with zone 1 remaining in
+byte3 and zone 2 remaining in byte6. Other compact combinations remain to be
+verified. Reading 20900102 returns all zeros unless 02 00 was recently written
+to 20900106 first.
 
 STATUS POLL / KEEPALIVE (20900106): write 02 00 immediately before reading
 20900102, or the status characteristic reads back all zeros even while a
@@ -645,8 +646,9 @@ def decode_status(value: bytes, debug=False):
     Print a human-friendly breakdown of the 20900102 status frame.
 
     byte0 is 0xff while idle. Active frames seen from different controller
-    firmware revisions use either 0xf0-0xf3 for one zone or a low-byte bitmask
-    where bit0-bit3 represent zones 1-4.
+    firmware revisions use 0xf0-0xf3 for one zone. The observed compact
+    multi-zone form uses byte0=0x01 with zone 1 time at byte3 and zone 2 time
+    at byte6.
 
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
@@ -663,9 +665,10 @@ def decode_status(value: bytes, debug=False):
         active_zones = []
     elif status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < 4:
         active_zones = [(status_byte & 0x0f) + 1]
-    elif 0 < status_byte <= 0x0f:
-        active_zones = [zone for zone in range(1, 5)
-                        if status_byte & (1 << (zone - 1))]
+    elif 0 < status_byte <= 4:
+        active_zones = [status_byte]
+        if status_byte == 1 and len(value) > 6 and value[6] > 0:
+            active_zones.append(2)
     else:
         active_zones = None
 
