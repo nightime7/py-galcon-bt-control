@@ -48,7 +48,13 @@ include_files = [
 
 build_exe_options = {
     "packages": ["asyncio", "bleak", "tkinter", "queue", "threading", "json"],
-    "includes": ["control_galcon"],
+    "includes": [
+        "control_galcon",
+        "http",
+        "http.client",
+        "urllib.error",
+        "urllib.request",
+    ],
     "include_files": include_files,
     "excludes": ["test", "unittest", "pydoc_data"],
     "include_msvcr": True,
