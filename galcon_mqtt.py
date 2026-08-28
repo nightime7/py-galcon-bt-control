@@ -91,6 +91,8 @@ class GalconMqttBridge:
         self.programs = {}
         self.last_status_at = 0.0
         self.active_zone = None
+        self.active_zones = []
+        self.remaining_by_zone = {}
         self.remaining_seconds = 0
         self.command_lock = asyncio.Lock()
         self.request_lock = asyncio.Lock()
@@ -189,12 +191,17 @@ class GalconMqttBridge:
         return 404, {"error": "not found"}
 
     def _status_json(self):
-        remaining = self.remaining_seconds
-        if self.active_zone is not None:
-            remaining = max(0, remaining - int(time.monotonic() - self.last_status_at))
-        return {"status": "idle" if self.active_zone is None else "running",
+        elapsed = int(time.monotonic() - self.last_status_at)
+        remaining = max(0, self.remaining_seconds - elapsed)
+        remaining_by_zone = {
+            str(zone): max(0, seconds - elapsed)
+            for zone, seconds in self.remaining_by_zone.items()
+        }
+        return {"status": "idle" if not self.active_zones else "running",
                 "active_zone": self.active_zone or 0,
+                "active_zones": self.active_zones,
                 "remaining_seconds": remaining,
+                "remaining_by_zone": remaining_by_zone,
                 "ble": self.client is not None and self.client.is_connected,
                 "updated_at": utc_now()}
 
@@ -362,25 +369,49 @@ class GalconMqttBridge:
         status_byte = value[0]
         if status_byte == 0xff:
             self.active_zone = None
+            self.active_zones = []
+            self.remaining_by_zone = {}
             self.remaining_seconds = 0
-        else:
-            if status_byte & 0xf0 != 0xf0 or status_byte & 0x0f >= ZONE_COUNT:
-                self.log(f"Ignoring invalid status frame zone byte 0x{status_byte:02x}")
-                self._publish("status", "unknown")
-                self._publish("active_zone", 0)
-                self._publish("error", f"Invalid status frame: 0x{status_byte:02x}")
-                return
-            self.active_zone = (status_byte & 0x0f) + 1
+        elif status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < ZONE_COUNT:
+            self.active_zones = [(status_byte & 0x0f) + 1]
+            self.active_zone = self.active_zones[0]
             self.remaining_seconds = value[2] * 60 + value[3]
+            self.remaining_by_zone = {self.active_zone: self.remaining_seconds}
+        elif 0 < status_byte <= ZONE_COUNT:
+            self.active_zone = status_byte
+            self.remaining_by_zone = {
+                self.active_zone: value[2] * 60 + value[3]
+            }
+            if (self.active_zone == 1 and len(value) > 6
+                    and value[6] > 0):
+                self.remaining_by_zone[2] = value[5] * 60 + value[6]
+            self.active_zones = [zone for zone, seconds
+                                 in self.remaining_by_zone.items()
+                                 if seconds > 0]
+            if self.active_zones:
+                self.active_zone = self.active_zones[0]
+                self.remaining_seconds = self.remaining_by_zone[self.active_zone]
+            else:
+                self.active_zone = None
+                self.remaining_seconds = 0
+        else:
+            self.log(f"Ignoring invalid status frame zone byte 0x{status_byte:02x}")
+            self._publish("status", "unknown")
+            self._publish("active_zone", 0)
+            self._publish("active_zones", "[]")
+            self._publish("error", f"Invalid status frame: 0x{status_byte:02x}")
+            return
         self.last_status_at = time.monotonic()
         active = self.active_zone
-        self._publish("status", "idle" if active is None else "running")
+        self._publish("status", "idle" if not self.active_zones else "running")
         self._publish("active_zone", active or 0)
+        self._publish("active_zones", json.dumps(self.active_zones))
         for zone in range(1, ZONE_COUNT + 1):
-            is_active = zone == active and self.remaining_seconds > 0
+            zone_remaining = self.remaining_by_zone.get(zone, 0)
+            is_active = zone in self.active_zones and zone_remaining > 0
             self._publish(f"zone/{zone}/state", "ON" if is_active else "OFF")
-            self._publish(f"zone/{zone}/remaining",
-                          self.remaining_seconds if is_active else 0)
+            self._publish(f"zone/{zone}/remaining", zone_remaining
+                          if is_active else 0)
         self._publish("last_update", utc_now())
 
     async def _poll_programs(self):
@@ -525,6 +556,8 @@ class GalconMqttBridge:
                         {}, device)
         self._discovery("sensor", "active_zone", "Active zone", "active_zone",
                         "active_zone", {}, device)
+        self._discovery("sensor", "active_zones", "Active zones", "active_zones",
+                None, {"icon": "mdi:valve"}, device)
         self._discovery("sensor", "last_update", "Last update", "last_update",
                         "last_update", {}, device)
         for zone in range(1, ZONE_COUNT + 1):

@@ -163,7 +163,7 @@ requires authentication or TLS. The default MQTT prefix is
 The bridge publishes Home Assistant MQTT Discovery entities automatically.
 After it connects to the broker, Home Assistant will discover:
 
-- Controller connection, status, active zone, and last-update sensors
+- Controller connection, status, active zone(s), and last-update sensors
 - Four zone switches and remaining-time sensors
 - Four zone program sensors containing JSON schedule data
 - Seasonal-adjustment and rain-off number controls
@@ -193,10 +193,11 @@ disconnects between polls unless `--keep-connected` is explicitly enabled.
 MQTT messages are retained so Home Assistant can restore the last known state
 while the bridge is disconnected.
 
-Zone commands are serialized because the controller exposes one active-zone
-status at a time. Starting another zone may therefore replace the previously
-running zone, depending on the controller firmware; Home Assistant reflects
-the controller's confirmed status after the command completes.
+Zone commands are serialized so rapid Home Assistant actions cannot interleave
+BLE writes and status reads. The controller can report multiple active zones;
+the bridge publishes both a backwards-compatible `active_zone` value and an
+`active_zones` JSON list, with an individual remaining-time sensor for each
+zone.
 
 After an on-demand command connects to the controller, the BLE link remains
 open for 120 seconds by default in case another command follows. The timer

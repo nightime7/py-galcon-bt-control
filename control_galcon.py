@@ -22,10 +22,11 @@ VALVE CONTROL (20900103) is a 20-byte frame:
     CLOSE: byte0 = zone (1-4)
            remaining bytes 0x00
 
-STATUS (20900102) is a 20-byte frame. byte0 is 0xff while idle; while a zone
-is running, the low nibble of byte0 encodes the zone (zone = (byte0 & 0x0f)
-+ 1). bytes[2:4] are [minutes][seconds] remaining. Reading 20900102 returns
-all zeros unless 02 00 was recently written to 20900106 first.
+STATUS (20900102) is a 20-byte frame. byte0 is 0xff while idle. Active
+firmware variants use either 0xf0-0xf3 for one zone or a low-byte bitmask
+where bit0-bit3 represent zones 1-4. bytes[2:4] are [minutes][seconds]
+remaining. Reading 20900102 returns all zeros unless 02 00 was recently
+written to 20900106 first.
 
 STATUS POLL / KEEPALIVE (20900106): write 02 00 immediately before reading
 20900102, or the status characteristic reads back all zeros even while a
@@ -643,9 +644,9 @@ def decode_status(value: bytes, debug=False):
     """
     Print a human-friendly breakdown of the 20900102 status frame.
 
-    byte0 is 0xff while idle. While a zone is active, the low nibble
-    encodes the zone: 0xf0=zone 1, 0xf1=zone 2, 0xf2=zone 3, 0xf3=zone 4.
-    Pattern: zone = (byte0 & 0x0f) + 1.
+    byte0 is 0xff while idle. Active frames seen from different controller
+    firmware revisions use either 0xf0-0xf3 for one zone or a low-byte bitmask
+    where bit0-bit3 represent zones 1-4.
 
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
@@ -657,25 +658,30 @@ def decode_status(value: bytes, debug=False):
     if len(value) < 20:
         return
     
-    idle = value[0] == 0xff
     status_byte = value[0]
-    
-    # Determine status string
-    if idle:
-        status_str = "IDLE"
+    if status_byte == 0xff:
+        active_zones = []
+    elif status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < 4:
+        active_zones = [(status_byte & 0x0f) + 1]
+    elif 0 < status_byte <= 0x0f:
+        active_zones = [zone for zone in range(1, 5)
+                        if status_byte & (1 << (zone - 1))]
     else:
-        zone_num = (status_byte & 0x0f) + 1
-        if 1 <= zone_num <= 4:
-            status_str = f"ZONE {zone_num} RUNNING"
-        else:
-            status_str = f"ACTIVE (unknown zone: {zone_num})"
+        active_zones = None
+
+    if active_zones == []:
+        status_str = "IDLE"
+    elif active_zones is not None:
+        status_str = "ZONES " + ",".join(map(str, active_zones)) + " RUNNING"
+    else:
+        status_str = f"ACTIVE (unknown status byte: {status_byte:#04x})"
     
     # Print formatted output with proper alignment
     print(f"       ╔{'═' * 40}╗")
     print(f"       ║ STATUS: {status_str:<31}║")
     print(f"       ╠{'═' * 40}╣")
     
-    if not idle:
+    if active_zones:
         mins = value[2]
         secs = value[3]
         total_seconds = mins * 60 + secs
