@@ -23,11 +23,10 @@ VALVE CONTROL (20900103) is a 20-byte frame:
            remaining bytes 0x00
 
 STATUS (20900102) is a 20-byte frame. byte0 is 0xff while idle. Active
-firmware variants use 0xf0-0xf3 for one zone. When zones 1 and 2 run
-together, the observed compact form is byte0=0x01 with zone 1 remaining in
-byte3 and zone 2 remaining in byte6. Other compact combinations remain to be
-verified. Reading 20900102 returns all zeros unless 02 00 was recently written
-to 20900106 first.
+firmware variants use 0xf0-0xf3 for one zone. For two zones, each zero-based
+zone index occupies one nibble of byte0; bytes 2-3 and 5-6 hold the remaining
+time for the first and second nibbles respectively. Reading 20900102 returns
+all zeros unless 02 00 was recently written to 20900106 first.
 
 STATUS POLL / KEEPALIVE (20900106): write 02 00 immediately before reading
 20900102, or the status characteristic reads back all zeros even while a
@@ -162,24 +161,6 @@ CHAR_POLL = "20900106-bdee-493a-aa74-a8137c9d43f0"
 
 STATUS_POLL = bytes([0x02, 0x00])
 
-# Compact status frames observed when two zones run together. The high nibble
-# identifies the higher-numbered zone and the low nibble the lower zone minus 1.
-COMPACT_ZONE_PAIRS = {
-    0x01: (1, 2),
-    # Zone 1 + zone 2 also appears as 0x10 when started in that order.
-    0x10: (1, 2),
-    0x20: (1, 3),
-    0x02: (1, 3),
-    0x21: (2, 3),
-    0x12: (2, 3),
-    0x30: (1, 4),
-    0x03: (1, 4),
-    0x31: (2, 4),
-    0x13: (2, 4),
-    0x32: (3, 4),
-    0x23: (3, 4),
-}
-
 # After closing one member of a pair, the surviving zone can briefly use this
 # compact single-zone form with its countdown in bytes 5-6.
 TRANSITIONAL_ZONE_CODES = {0x2f: 3, 0x3f: 4}
@@ -218,10 +199,11 @@ def decode_active_zones(value: bytes):
     if status_byte in TRANSITIONAL_ZONE_CODES:
         zone = TRANSITIONAL_ZONE_CODES[status_byte]
         return [(zone, value[5] * 60 + value[6])]
-    pair = COMPACT_ZONE_PAIRS.get(status_byte)
-    if pair:
-        return [(pair[0], value[2] * 60 + value[3]),
-                (pair[1], value[5] * 60 + value[6])]
+    first_index, second_index = status_byte >> 4, status_byte & 0x0f
+    if (first_index < 4 and second_index < 4
+            and first_index != second_index):
+        return [(first_index + 1, value[2] * 60 + value[3]),
+                (second_index + 1, value[5] * 60 + value[6])]
     return None
 
 
@@ -688,10 +670,10 @@ def decode_status(value: bytes, debug=False):
     Print a human-friendly breakdown of the 20900102 status frame.
 
     byte0 is 0xff while idle. Active frames seen from different controller
-    firmware revisions use 0xf0-0xf3 for one zone. The observed compact
-    multi-zone form uses byte0=0x01 with zone 1 time at byte3 and zone 2 time
-    at byte6. During pair shutdown, 0x2f and 0x3f identify surviving zones 3
-    and 4 respectively, with their time at bytes 5-6.
+    firmware revisions use 0xf0-0xf3 for one zone. In compact multi-zone
+    frames, the high and low nibbles are zero-based zone indices, with timers
+    in bytes 2-3 and 5-6. During pair shutdown, 0x2f and 0x3f identify
+    surviving zones 3 and 4 respectively, with time at bytes 5-6.
 
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
