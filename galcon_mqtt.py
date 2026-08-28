@@ -28,7 +28,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import paho.mqtt.client as mqtt
 
@@ -546,7 +546,34 @@ class GalconMqttBridge:
         if days & 0x80:
             payload["start_in_days"] = max(0, record[13] - 0x80)
             payload["cadence_days"] = max(0, record[14] - 0xc0)
-        self._publish(f"zone/{zone}/program", json.dumps(payload))
+        self._publish(f"zone/{zone}/program/details", json.dumps(payload))
+        self._publish(f"zone/{zone}/program", payload["mode"])
+        self._publish(f"zone/{zone}/program/duration", payload["duration_minutes"])
+        next_run = self._next_program_run(record)
+        self._publish(f"zone/{zone}/program/next_run",
+                      next_run.isoformat() if next_run else "unknown")
+
+    def _next_program_run(self, record):
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        hour, minute = record[5], record[6]
+        if hour == 0xff or hour > 23 or minute > 59:
+            return None
+        start_time = now.replace(hour=hour, minute=minute)
+        if record[4] & 0x80:
+            offset = max(0, record[13] - 0x80)
+            cadence = max(1, record[14] - 0xc0)
+            candidate = start_time + timedelta(days=offset)
+            while candidate <= now:
+                candidate += timedelta(days=cadence)
+            return candidate
+
+        candidates = []
+        for day_offset in range(8):
+            candidate = start_time + timedelta(days=day_offset)
+            sunday_first = (candidate.weekday() + 1) % 7
+            if record[4] & (1 << sunday_first) and candidate > now:
+                candidates.append(candidate)
+        return min(candidates) if candidates else None
 
     def _publish_discovery(self):
         device = {
@@ -577,7 +604,18 @@ class GalconMqttBridge:
                             f"zone/{zone}/remaining", {"unit_of_measurement": "s"}, zd)
             self._discovery("sensor", f"zone_{zone}_program",
                             f"Zone {zone} program", f"zone/{zone}/program",
-                            f"zone/{zone}/program", {"icon": "mdi:calendar-clock"}, zd)
+                            None, {"icon": "mdi:calendar-clock",
+                                   "json_attributes_topic": self.topic(
+                                       f"zone/{zone}/program/details")}, zd)
+            self._discovery("sensor", f"zone_{zone}_program_duration",
+                            f"Zone {zone} program duration",
+                            f"zone/{zone}/program/duration", None,
+                            {"unit_of_measurement": "min"}, zd)
+            self._discovery("sensor", f"zone_{zone}_program_next_run",
+                            f"Zone {zone} next run",
+                            f"zone/{zone}/program/next_run", None,
+                            {"device_class": "timestamp",
+                             "icon": "mdi:calendar-clock"}, zd)
         self._discovery("number", "seasonal", "Seasonal adjustment",
                         "device/seasonal", "device/seasonal/set",
                         {"min": 0, "max": 250, "step": 1, "unit_of_measurement": "%"}, device)

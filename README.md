@@ -165,7 +165,8 @@ After it connects to the broker, Home Assistant will discover:
 
 - Controller connection, status, active-zones, and last-update sensors
 - Four zone switches and remaining-time sensors
-- Four zone program sensors containing JSON schedule data
+- Four zone program-mode sensors with JSON schedule attributes, duration
+    sensors, and calculated next-run timestamp sensors
 - Seasonal-adjustment and rain-off number controls
 
 The bridge also publishes retained `galcon_gl6100/availability` (`online` or
