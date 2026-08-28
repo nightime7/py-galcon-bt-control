@@ -604,7 +604,7 @@ class GalconMqttBridge:
                 None, {"icon": "mdi:valve"}, device)
         self._discovery("sensor", "last_update", "Last update", "last_update",
                         "last_update", {}, device)
-        self._discovery("button", "refresh", "Refresh controller", None,
+        self._discovery("button", "refresh", "Update Status", None,
                 "refresh", {"icon": "mdi:refresh"}, device,
                 payload_press="refresh")
         for zone in range(1, ZONE_COUNT + 1):
