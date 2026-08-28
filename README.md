@@ -193,6 +193,11 @@ disconnects between polls unless `--keep-connected` is explicitly enabled.
 MQTT messages are retained so Home Assistant can restore the last known state
 while the bridge is disconnected.
 
+Zone commands are serialized because the controller exposes one active-zone
+status at a time. Starting another zone may therefore replace the previously
+running zone, depending on the controller firmware; Home Assistant reflects
+the controller's confirmed status after the command completes.
+
 After an on-demand command connects to the controller, the BLE link remains
 open for 120 seconds by default in case another command follows. The timer
 resets with each command and can be changed with `--idle-grace <seconds>` or

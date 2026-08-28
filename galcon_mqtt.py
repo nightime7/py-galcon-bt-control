@@ -93,6 +93,7 @@ class GalconMqttBridge:
         self.active_zone = None
         self.remaining_seconds = 0
         self.command_lock = asyncio.Lock()
+        self.request_lock = asyncio.Lock()
         self.stop_event = asyncio.Event()
         self.status_event = asyncio.Event()
         self.http_server = None
@@ -265,7 +266,7 @@ class GalconMqttBridge:
                 await self._disconnect_ble()
             await asyncio.sleep(self.args.poll_interval)
 
-    async def _connect_ble(self):
+    async def _connect_ble(self, load_programs=True):
         if self.client and self.client.is_connected:
             return
         self._publish("ble", "scanning")
@@ -295,7 +296,8 @@ class GalconMqttBridge:
         self._publish("ble", "connected")
         self.log("BLE connected")
         await self._poll_status()
-        await self._poll_programs()
+        if load_programs:
+            await self._poll_programs()
 
     async def _disconnect_ble(self):
         if self.client and self.client.is_connected:
@@ -331,10 +333,10 @@ class GalconMqttBridge:
             await self._poll_status()
             await asyncio.sleep(self.args.poll_interval)
 
-    async def _ensure_ble_connected(self):
+    async def _ensure_ble_connected(self, load_programs=False):
         if self.client and self.client.is_connected:
             return
-        await self._connect_ble()
+        await self._connect_ble(load_programs=load_programs)
 
     def _on_status_notify(self, _sender, data):
         self.status = bytes(data)
@@ -357,11 +359,18 @@ class GalconMqttBridge:
     def _publish_status(self, value):
         if not value or not any(value):
             return
-        if value[0] == 0xff:
+        status_byte = value[0]
+        if status_byte == 0xff:
             self.active_zone = None
             self.remaining_seconds = 0
         else:
-            self.active_zone = (value[0] & 0x0f) + 1
+            if status_byte & 0xf0 != 0xf0 or status_byte & 0x0f >= ZONE_COUNT:
+                self.log(f"Ignoring invalid status frame zone byte 0x{status_byte:02x}")
+                self._publish("status", "unknown")
+                self._publish("active_zone", 0)
+                self._publish("error", f"Invalid status frame: 0x{status_byte:02x}")
+                return
+            self.active_zone = (status_byte & 0x0f) + 1
             self.remaining_seconds = value[2] * 60 + value[3]
         self.last_status_at = time.monotonic()
         active = self.active_zone
@@ -387,40 +396,43 @@ class GalconMqttBridge:
         if not self.args.keep_connected:
             self._reset_idle_disconnect()
         try:
-            await self._ensure_ble_connected()
-            if topic == self.topic("refresh"):
-                await self._poll_status()
-                await self._poll_programs()
-                return
-            if topic == self.topic("device/seasonal/set"):
-                value = int(text)
-                if not 0 <= value <= 250:
-                    raise ValueError("seasonal adjustment must be 0-250")
-                async with self.command_lock:
-                    await write_char(self.client, CHAR_VALVE,
-                                     build_seasonal_payload(value),
-                                     f"SEASONAL {value}%")
-                self._publish("device/seasonal", value)
-                return
-            if topic == self.topic("device/rainoff/set"):
-                value = int(text)
-                if not 0 <= value <= 255:
-                    raise ValueError("rain-off days must be 0-255")
-                async with self.command_lock:
-                    await write_char(self.client, CHAR_VALVE,
-                                     build_rainoff_payload(value),
-                                     f"RAIN OFF {value} days")
-                self._publish("device/rainoff", value)
-                return
-            parts = topic.split("/")
-            if len(parts) >= 3 and parts[-1] == "set" and parts[-2].isdigit():
-                zone = int(parts[-2])
-                if parts[-3] == "zone":
-                    await self._set_zone(zone, text)
+            async with self.request_lock:
+                await self._ensure_ble_connected(
+                    load_programs=topic == self.topic("refresh")
+                    or topic.endswith("/program/set"))
+                if topic == self.topic("refresh"):
+                    await self._poll_status()
+                    await self._poll_programs()
                     return
-            if len(parts) >= 4 and parts[-2:] == ["program", "set"]:
-                zone = int(parts[-3])
-                await self._set_program(zone, text)
+                if topic == self.topic("device/seasonal/set"):
+                    value = int(text)
+                    if not 0 <= value <= 250:
+                        raise ValueError("seasonal adjustment must be 0-250")
+                    async with self.command_lock:
+                        await write_char(self.client, CHAR_VALVE,
+                                         build_seasonal_payload(value),
+                                         f"SEASONAL {value}%")
+                    self._publish("device/seasonal", value)
+                    return
+                if topic == self.topic("device/rainoff/set"):
+                    value = int(text)
+                    if not 0 <= value <= 255:
+                        raise ValueError("rain-off days must be 0-255")
+                    async with self.command_lock:
+                        await write_char(self.client, CHAR_VALVE,
+                                         build_rainoff_payload(value),
+                                         f"RAIN OFF {value} days")
+                    self._publish("device/rainoff", value)
+                    return
+                parts = topic.split("/")
+                if len(parts) >= 3 and parts[-1] == "set" and parts[-2].isdigit():
+                    zone = int(parts[-2])
+                    if parts[-3] == "zone":
+                        await self._set_zone(zone, text)
+                        return
+                if len(parts) >= 4 and parts[-2:] == ["program", "set"]:
+                    zone = int(parts[-3])
+                    await self._set_program(zone, text)
         finally:
             if not self.args.keep_connected:
                 self._arm_idle_disconnect()
