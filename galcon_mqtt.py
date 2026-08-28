@@ -130,6 +130,11 @@ class GalconMqttBridge:
             self.http_server = await asyncio.start_server(
                 self._handle_http, self.args.http_host, self.args.http_port)
             self.log(f"HTTP API listening on {self.args.http_host}:{self.args.http_port}")
+        if self.args.initial_refresh:
+            self.log("Collecting initial controller status and programs...")
+            await self._handle_mqtt(self.topic("refresh"), b"startup")
+            self._reset_idle_disconnect()
+            await self._disconnect_ble()
         await self._ble_loop()
 
     async def _handle_http(self, reader, writer):
@@ -593,6 +598,9 @@ class GalconMqttBridge:
                 None, {"icon": "mdi:valve"}, device)
         self._discovery("sensor", "last_update", "Last update", "last_update",
                         "last_update", {}, device)
+        self._discovery("button", "refresh", "Refresh controller", None,
+                "refresh", {"icon": "mdi:refresh"}, device,
+                payload_press="refresh")
         for zone in range(1, ZONE_COUNT + 1):
             zd = {**device, "identifiers": [f"{self.prefix}_zone_{zone}"],
                   "name": f"Galcon GL6100 Zone {zone}"}
@@ -633,13 +641,14 @@ class GalconMqttBridge:
         config = {
             "name": name,
             "unique_id": f"{self.prefix}_{object_id}",
-            "state_topic": self.topic(state_suffix),
             "availability_topic": self.topic("availability"),
             "payload_available": "online",
             "payload_not_available": "offline",
             "device": device,
             **extra,
         }
+        if state_suffix:
+            config["state_topic"] = self.topic(state_suffix)
         if command_suffix:
             config["command_topic"] = self.topic(command_suffix)
         config.update(kwargs)
@@ -698,6 +707,9 @@ def main():
     parser.add_argument("--ble-connect-timeout", type=float,
                         help="Seconds allowed for Windows/Bleak BLE connect; "
                              "default 60")
+    parser.add_argument("--no-initial-refresh", action="store_false",
+                        dest="initial_refresh", default=None,
+                        help="Skip the one status/program collection at startup")
     parser.add_argument("--reconnect-delay", type=float,
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -706,7 +718,7 @@ def main():
                  "mqtt_tls", "mqtt_client_id", "mqtt_timeout", "http_host",
                  "http_port", "prefix", "mac", "scan_time", "poll_interval",
                  "keep_connected", "idle_grace", "ble_connect_timeout",
-                 "reconnect_delay"):
+                 "initial_refresh", "reconnect_delay"):
         if getattr(args, name) is None and name in config:
             setattr(args, name, config[name])
     args.mqtt_host = args.mqtt_host or ""
@@ -731,6 +743,8 @@ def main():
                                 else DEFAULT_BLE_CONNECT_TIMEOUT)
     if args.ble_connect_timeout <= 0:
         parser.error("--ble-connect-timeout must be positive")
+    args.initial_refresh = (args.initial_refresh
+                            if args.initial_refresh is not None else True)
     args.reconnect_delay = (args.reconnect_delay
                             if args.reconnect_delay is not None else 10.0)
     if not args.mqtt_host:

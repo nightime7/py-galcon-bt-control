@@ -12,6 +12,7 @@
   "mac": "",
   "scan_time": 60,
   "ble_connect_timeout": 60,
+  "initial_refresh": true,
   "poll_interval": 0,
   "keep_connected": false,
   "idle_grace": 120,

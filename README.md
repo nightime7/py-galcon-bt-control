@@ -188,7 +188,10 @@ Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
 `cadence`, and `start_in`. By default the bridge does not connect to the
 controller or perform background polling. It connects only when Home
 Assistant sends a command or refresh request, then disconnects after it
-finishes. To enable repeating polling, explicitly provide an interval, for
+finishes. It also performs one initial status/program collection at startup
+so Home Assistant entities are populated immediately. Use
+`--no-initial-refresh` or `initial_refresh: false` to skip that one connection.
+To enable repeating polling, explicitly provide an interval, for
 example `--poll-interval 900` for one poll every 15 minutes. The bridge
 disconnects between polls unless `--keep-connected` is explicitly enabled.
 MQTT messages are retained so Home Assistant can restore the last known state
