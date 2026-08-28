@@ -163,7 +163,7 @@ STATUS_POLL = bytes([0x02, 0x00])
 
 # After closing one member of a pair, the surviving zone can briefly use this
 # compact single-zone form with its countdown in bytes 5-6.
-TRANSITIONAL_ZONE_CODES = {0x2f: 3, 0x3f: 4}
+TRANSITIONAL_ZONE_CODES = {0x0f: 1, 0x1f: 2, 0x2f: 3, 0x3f: 4}
 
 
 def ts() -> str:
@@ -672,8 +672,8 @@ def decode_status(value: bytes, debug=False):
     byte0 is 0xff while idle. Active frames seen from different controller
     firmware revisions use 0xf0-0xf3 for one zone. In compact multi-zone
     frames, the high and low nibbles are zero-based zone indices, with timers
-    in bytes 2-3 and 5-6. During pair shutdown, 0x2f and 0x3f identify
-    surviving zones 3 and 4 respectively, with time at bytes 5-6.
+    in bytes 2-3 and 5-6. During pair shutdown, 0x0f, 0x1f, 0x2f, and 0x3f
+    identify surviving zones 1-4 respectively, with time at bytes 5-6.
 
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
