@@ -562,8 +562,6 @@ class GalconMqttBridge:
                        "payload_off": "disconnected"}, device)
         self._discovery("sensor", "status", "Status", "status", "status",
                         {}, device)
-        self._discovery("sensor", "active_zone", "Active zone", "active_zone",
-                        "active_zone", {}, device)
         self._discovery("sensor", "active_zones", "Active zones", "active_zones",
                 None, {"icon": "mdi:valve"}, device)
         self._discovery("sensor", "last_update", "Last update", "last_update",
@@ -587,6 +585,10 @@ class GalconMqttBridge:
                         "device/rainoff", "device/rainoff/set",
                         {"min": 0, "max": 255, "step": 1,
                          "unit_of_measurement": "d"}, device)
+        # Clear the old single-zone entity from brokers that retained it.
+        self.mqtt.publish(
+            f"homeassistant/sensor/{self.prefix}/active_zone/config",
+            "", qos=1, retain=True)
 
     def _discovery(self, component, object_id, name, state_suffix,
                    command_suffix, extra, device, **kwargs):

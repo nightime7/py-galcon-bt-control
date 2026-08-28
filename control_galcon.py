@@ -169,9 +169,13 @@ COMPACT_ZONE_PAIRS = {
     # Zone 1 + zone 2 also appears as 0x10 when started in that order.
     0x10: (1, 2),
     0x20: (1, 3),
+    0x02: (1, 3),
     0x21: (2, 3),
+    0x12: (2, 3),
     0x30: (1, 4),
+    0x03: (1, 4),
     0x31: (2, 4),
+    0x13: (2, 4),
     0x32: (3, 4),
     0x23: (3, 4),
 }
