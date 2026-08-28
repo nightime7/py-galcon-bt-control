@@ -56,7 +56,7 @@ from control_galcon import (
 
 DEFAULT_PREFIX = "galcon_gl6100"
 ZONE_COUNT = 4
-POLL_SECONDS = 10
+DEFAULT_POLL_INTERVAL = 15 * 60
 
 
 def utc_now():
@@ -85,6 +85,7 @@ class GalconMqttBridge:
         self.stop_event = asyncio.Event()
         self.status_event = asyncio.Event()
         self.http_server = None
+        self.last_device = None
 
     @property
     def prefix(self):
@@ -190,7 +191,7 @@ class GalconMqttBridge:
                                       self.args.mqtt_password)
         if self.args.mqtt_tls:
             self.mqtt.tls_set()
-        self.mqtt.will_set(self.topic("status"), "offline", qos=1, retain=True)
+        self.mqtt.will_set(self.topic("availability"), "offline", qos=1, retain=True)
         self.mqtt.on_connect = self._on_mqtt_connect
         self.mqtt.on_message = self._on_mqtt_message
         self.mqtt.connect_async(self.args.mqtt_host, self.args.mqtt_port,
@@ -223,10 +224,16 @@ class GalconMqttBridge:
             self._publish("error", str(exc))
 
     async def _ble_loop(self):
+        if self.args.poll_interval <= 0:
+            await self.stop_event.wait()
+            return
         while not self.stop_event.is_set():
             try:
                 await self._connect_ble()
-                await self._connected_loop()
+                if self.args.keep_connected:
+                    await self._connected_loop()
+                else:
+                    await self._disconnect_ble()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -235,19 +242,34 @@ class GalconMqttBridge:
                 self._publish("ble", "disconnected")
             finally:
                 await self._disconnect_ble()
-            await asyncio.sleep(self.args.reconnect_delay)
+            await asyncio.sleep(self.args.poll_interval)
 
     async def _connect_ble(self):
+        if self.client and self.client.is_connected:
+            return
         self._publish("ble", "scanning")
-        self.device = await find_device(self.args.scan_time,
-                                        mac=self.args.mac or load_saved_mac())
-        if self.device is None:
-            raise RuntimeError("Controller not found; press a controller button to wake it")
-        self._publish("ble", "connecting")
-        self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
-            self.device, timeout=30.0, services=[SERVICE_UUID],
-            winrt=dict(use_cached_services=True))
-        await self.client.connect()
+        mac = self.args.mac or load_saved_mac()
+        if self.last_device is not None:
+            try:
+                self.device = self.last_device
+                self._publish("ble", "connecting")
+                self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
+                    self.device, timeout=15.0, services=[SERVICE_UUID],
+                    winrt=dict(use_cached_services=True))
+                await self.client.connect()
+            except Exception:  # noqa: BLE001
+                self.client = None
+
+        if self.client is None:
+            self.device = await find_device(self.args.scan_time, mac=mac)
+            if self.device is None:
+                raise RuntimeError("Controller not found; press a controller button to wake it")
+            self.last_device = self.device
+            self._publish("ble", "connecting")
+            self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
+                self.device, timeout=30.0, services=[SERVICE_UUID],
+                winrt=dict(use_cached_services=True))
+            await self.client.connect()
         await self.client.start_notify(CHAR_STATUS, self._on_status_notify)
         self._publish("ble", "connected")
         self.log("BLE connected")
@@ -265,7 +287,7 @@ class GalconMqttBridge:
     async def _connected_loop(self):
         while self.client and self.client.is_connected and not self.stop_event.is_set():
             await self._poll_status()
-            await asyncio.sleep(POLL_SECONDS)
+            await asyncio.sleep(self.args.poll_interval)
 
     def _on_status_notify(self, _sender, data):
         self.status = bytes(data)
@@ -315,39 +337,44 @@ class GalconMqttBridge:
 
     async def _handle_mqtt(self, topic, payload):
         text = payload.decode("utf-8").strip()
-        if topic == self.topic("refresh"):
-            await self._poll_status()
-            await self._poll_programs()
-            return
-        if topic == self.topic("device/seasonal/set"):
-            value = int(text)
-            if not 0 <= value <= 250:
-                raise ValueError("seasonal adjustment must be 0-250")
-            async with self.command_lock:
-                await write_char(self.client, CHAR_VALVE,
-                                 build_seasonal_payload(value),
-                                 f"SEASONAL {value}%")
-            self._publish("device/seasonal", value)
-            return
-        if topic == self.topic("device/rainoff/set"):
-            value = int(text)
-            if not 0 <= value <= 255:
-                raise ValueError("rain-off days must be 0-255")
-            async with self.command_lock:
-                await write_char(self.client, CHAR_VALVE,
-                                 build_rainoff_payload(value),
-                                 f"RAIN OFF {value} days")
-            self._publish("device/rainoff", value)
-            return
-        parts = topic.split("/")
-        if len(parts) >= 3 and parts[-1] == "set" and parts[-2].isdigit():
-            zone = int(parts[-2])
-            if parts[-3] == "zone":
-                await self._set_zone(zone, text)
+        await self._ensure_ble_connected()
+        try:
+            if topic == self.topic("refresh"):
+                await self._poll_status()
+                await self._poll_programs()
                 return
-        if len(parts) >= 4 and parts[-2:] == ["program", "set"]:
-            zone = int(parts[-3])
-            await self._set_program(zone, text)
+            if topic == self.topic("device/seasonal/set"):
+                value = int(text)
+                if not 0 <= value <= 250:
+                    raise ValueError("seasonal adjustment must be 0-250")
+                async with self.command_lock:
+                    await write_char(self.client, CHAR_VALVE,
+                                     build_seasonal_payload(value),
+                                     f"SEASONAL {value}%")
+                self._publish("device/seasonal", value)
+                return
+            if topic == self.topic("device/rainoff/set"):
+                value = int(text)
+                if not 0 <= value <= 255:
+                    raise ValueError("rain-off days must be 0-255")
+                async with self.command_lock:
+                    await write_char(self.client, CHAR_VALVE,
+                                     build_rainoff_payload(value),
+                                     f"RAIN OFF {value} days")
+                self._publish("device/rainoff", value)
+                return
+            parts = topic.split("/")
+            if len(parts) >= 3 and parts[-1] == "set" and parts[-2].isdigit():
+                zone = int(parts[-2])
+                if parts[-3] == "zone":
+                    await self._set_zone(zone, text)
+                    return
+            if len(parts) >= 4 and parts[-2:] == ["program", "set"]:
+                zone = int(parts[-3])
+                await self._set_program(zone, text)
+        finally:
+            if not self.args.keep_connected:
+                await self._disconnect_ble()
 
     async def _set_zone(self, zone, value):
         if not 1 <= zone <= ZONE_COUNT:
@@ -509,7 +536,16 @@ def main():
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--mac", default=None)
     parser.add_argument("--scan-time", type=float, default=60.0)
-    parser.add_argument("--reconnect-delay", type=float, default=10.0)
+    parser.add_argument("--poll-interval", type=float,
+                        default=DEFAULT_POLL_INTERVAL,
+                        help="Seconds between background BLE polls; default "
+                            "900 (15 minutes). Set 0 for command-only "
+                            "on-demand connections.")
+    parser.add_argument("--keep-connected", action="store_true",
+                        help="Keep BLE connected between polls/commands. "
+                            "Off by default to reduce controller battery use.")
+    parser.add_argument("--reconnect-delay", type=float, default=10.0,
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     async def runner():

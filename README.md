@@ -17,7 +17,7 @@ the module docstring in `control_galcon.py` for full protocol notes.
   countdown timers, and a program editor (weekly/cyclic, per-window
   enable/disable, hour/minute dropdowns).
 - `galcon_mqtt.py` - a headless MQTT bridge with Home Assistant MQTT
-    Discovery, persistent BLE connection/reconnect, status polling, zone
+    Discovery, battery-friendly BLE connection/reconnect, status polling, zone
     controls, and program/device setting topics.
 
 ## Install
@@ -171,10 +171,14 @@ galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
 ```
 
 Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
-`cadence`, and `start_in`. The bridge keeps the BLE connection open, polls
-status every 10 seconds, publishes retained state, and reconnects after a
-link loss. MQTT messages are retained so Home Assistant can restore the last
-known state while the bridge reconnects.
+`cadence`, and `start_in`. By default the bridge connects, polls, publishes,
+disconnects, and waits 15 minutes before the next poll. It does not hold a
+BLE connection open between polls, reducing controller battery use. Set
+`--poll-interval 0` for fully on-demand mode: it connects only when Home
+Assistant sends a command or refresh request, then disconnects after it
+finishes. Use `--keep-connected` only when continuous connection is more
+important than battery life. MQTT messages are retained so Home Assistant can
+restore the last known state while the bridge is disconnected.
 
 For unattended operation, create a Windows Task Scheduler task that runs
 `galcon-mqtt.exe --mqtt-host <broker>` at user logon or system startup. Set
