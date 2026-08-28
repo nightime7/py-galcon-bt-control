@@ -249,6 +249,8 @@ class GalconMqttBridge:
     def _log_future_error(self, future):
         try:
             future.result()
+        except asyncio.CancelledError:
+            return
         except Exception as exc:  # noqa: BLE001
             self.log(f"MQTT command failed: {type(exc).__name__}: {exc}")
             self._publish("error", str(exc))
@@ -288,6 +290,7 @@ class GalconMqttBridge:
                     winrt=dict(use_cached_services=True))
                 await self.client.connect()
             except Exception:  # noqa: BLE001
+                await self._disconnect_ble()
                 self.client = None
 
         if self.client is None:
@@ -299,7 +302,11 @@ class GalconMqttBridge:
             self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
                 self.device, timeout=30.0, services=[SERVICE_UUID],
                 winrt=dict(use_cached_services=True))
-            await self.client.connect()
+            try:
+                await self.client.connect()
+            except Exception:
+                await self._disconnect_ble()
+                raise
         await self.client.start_notify(CHAR_STATUS, self._on_status_notify)
         self._publish("ble", "connected")
         self.log("BLE connected")
@@ -308,12 +315,12 @@ class GalconMqttBridge:
             await self._poll_programs()
 
     async def _disconnect_ble(self):
-        if self.client and self.client.is_connected:
+        client, self.client = self.client, None
+        if client is not None:
             try:
-                await self.client.disconnect()
+                await client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 self.log(f"BLE disconnect failed: {exc}")
-        self.client = None
 
     def _reset_idle_disconnect(self):
         if self.idle_disconnect_task is not None:
@@ -455,7 +462,7 @@ class GalconMqttBridge:
                     zone = int(parts[-3])
                     await self._set_program(zone, text)
         finally:
-            if not self.args.keep_connected:
+            if not self.args.keep_connected and not self.stop_event.is_set():
                 self._arm_idle_disconnect()
 
     async def _set_zone(self, zone, value):
@@ -595,7 +602,13 @@ class GalconMqttBridge:
 
     async def stop(self):
         self.stop_event.set()
+        idle_task = self.idle_disconnect_task
         self._reset_idle_disconnect()
+        if idle_task is not None:
+            try:
+                await idle_task
+            except asyncio.CancelledError:
+                pass
         await self._disconnect_ble()
         if self.http_server:
             self.http_server.close()
