@@ -47,7 +47,7 @@ include_files = [
 ]
 
 build_exe_options = {
-    "packages": ["asyncio", "bleak", "tkinter", "queue", "threading", "json"],
+    "packages": ["asyncio", "bleak", "paho", "tkinter", "queue", "threading", "json"],
     "includes": [
         "control_galcon",
         "http",
@@ -120,6 +120,12 @@ executables = [
         script=str(ROOT / "control_galcon.py"),
         base=None,
         target_name="galcon-cli.exe",
+        copyright="Copyright (C) 2026",
+    ),
+    Executable(
+        script=str(ROOT / "galcon_mqtt.py"),
+        base=None,
+        target_name="galcon-mqtt.exe",
         copyright="Copyright (C) 2026",
     ),
 ]

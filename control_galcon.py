@@ -125,7 +125,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 
 # Single source of truth for the version; setup_msi.py and the GUI read this.
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "nightime7/py-galcon-bt-control"
 
 # The GL6100 advertises under this name regardless of which physical unit

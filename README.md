@@ -16,6 +16,9 @@ the module docstring in `control_galcon.py` for full protocol notes.
 - `galcon_gui.py` - a desktop GUI (Tkinter) with live zone status,
   countdown timers, and a program editor (weekly/cyclic, per-window
   enable/disable, hour/minute dropdowns).
+- `galcon_mqtt.py` - a headless MQTT bridge with Home Assistant MQTT
+    Discovery, persistent BLE connection/reconnect, status polling, zone
+    controls, and program/device setting topics.
 
 ## Install
 
@@ -27,7 +30,8 @@ and run it. Python does **not** need to be installed - the MSI bundles its
 own interpreter and all dependencies.
 
 The installer adds Start Menu and Desktop shortcuts for the GUI, and also
-installs `galcon-cli.exe` alongside it for command-line use.
+installs `galcon-cli.exe` and `galcon-mqtt.exe` alongside it for command-line
+and Home Assistant use.
 
 The installer uses the standard Windows MSI flow, including a GPL-3.0 license
 agreement page, an install-folder chooser, an all-users installation option,
@@ -116,6 +120,66 @@ For the GUI:
 ```powershell
 python galcon_gui.py
 ```
+
+## Home Assistant / MQTT
+
+Run the bridge on a Windows PC that has Bluetooth access to the controller and
+network access to your MQTT broker:
+
+```powershell
+python galcon_mqtt.py --mqtt-host homeassistant.local
+```
+
+An optional local HTTP API can be enabled for REST-based Home Assistant
+entities or diagnostics:
+
+```powershell
+python galcon_mqtt.py --mqtt-host homeassistant.local --http-host 0.0.0.0 --http-port 8765
+```
+
+It provides `GET /api/status`, `GET /api/programs`, `POST /api/refresh`,
+`POST /api/zone/<zone>/set` with `{"command":"OPEN:5"}`, and device setting
+POST endpoints. Keep the HTTP API on a trusted network; it has no built-in
+authentication.
+
+With the MSI, run `galcon-mqtt.exe` from the installation folder. Add
+`--mqtt-username`, `--mqtt-password`, and `--mqtt-tls` when your broker
+requires authentication or TLS. The default MQTT prefix is
+`galcon_gl6100`; change it with `--prefix` if more than one bridge is used.
+
+The bridge publishes Home Assistant MQTT Discovery entities automatically.
+After it connects to the broker, Home Assistant will discover:
+
+- Controller connection, status, active zone, and last-update sensors
+- Four zone switches and remaining-time sensors
+- Four zone program sensors containing JSON schedule data
+- Seasonal-adjustment and rain-off number controls
+
+The bridge also publishes retained `galcon_gl6100/availability` (`online` or
+`offline`) separately from `galcon_gl6100/status` (`idle` or `running`), so
+Home Assistant can distinguish a connected idle controller from a disconnected
+one.
+
+Useful MQTT commands:
+
+```text
+galcon_gl6100/zone/1/set              ON, OFF, OPEN:5, or CLOSE
+galcon_gl6100/refresh                 any payload; repolls status/programs
+galcon_gl6100/device/seasonal/set     100
+galcon_gl6100/device/rainoff/set      0
+galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
+```
+
+Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
+`cadence`, and `start_in`. The bridge keeps the BLE connection open, polls
+status every 10 seconds, publishes retained state, and reconnects after a
+link loss. MQTT messages are retained so Home Assistant can restore the last
+known state while the bridge reconnects.
+
+For unattended operation, create a Windows Task Scheduler task that runs
+`galcon-mqtt.exe --mqtt-host <broker>` at user logon or system startup. Set
+the task to run whether or not a user is logged on. The MQTT bridge is
+headless and does not require the GUI to be open.
 
 ## Building the installer
 
