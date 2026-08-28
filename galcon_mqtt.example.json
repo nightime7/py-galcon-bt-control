@@ -11,6 +11,7 @@
   "prefix": "galcon_gl6100",
   "mac": "",
   "scan_time": 60,
+  "ble_connect_timeout": 60,
   "poll_interval": 0,
   "keep_connected": false,
   "idle_grace": 120,

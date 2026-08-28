@@ -60,6 +60,7 @@ DEFAULT_PREFIX = "galcon_gl6100"
 ZONE_COUNT = 4
 DEFAULT_POLL_INTERVAL = 0
 DEFAULT_IDLE_GRACE = 120
+DEFAULT_BLE_CONNECT_TIMEOUT = 60
 MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
 
 
@@ -286,7 +287,8 @@ class GalconMqttBridge:
                 self.device = self.last_device
                 self._publish("ble", "connecting")
                 self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
-                    self.device, timeout=15.0, services=[SERVICE_UUID],
+                    self.device, timeout=self.args.ble_connect_timeout,
+                    services=[SERVICE_UUID],
                     winrt=dict(use_cached_services=True))
                 await self.client.connect()
             except Exception:  # noqa: BLE001
@@ -299,14 +301,23 @@ class GalconMqttBridge:
                 raise RuntimeError("Controller not found; press a controller button to wake it")
             self.last_device = self.device
             self._publish("ble", "connecting")
-            self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
-                self.device, timeout=30.0, services=[SERVICE_UUID],
-                winrt=dict(use_cached_services=True))
-            try:
-                await self.client.connect()
-            except Exception:
-                await self._disconnect_ble()
-                raise
+            last_error = None
+            for attempt in range(2):
+                self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
+                    self.device, timeout=self.args.ble_connect_timeout,
+                    services=[SERVICE_UUID],
+                    winrt=dict(use_cached_services=True))
+                try:
+                    await self.client.connect()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    await self._disconnect_ble()
+                    if attempt == 0:
+                        self.log("BLE connect timed out/failed; retrying "
+                                 "the discovered device...")
+            else:
+                raise last_error
         await self.client.start_notify(CHAR_STATUS, self._on_status_notify)
         self._publish("ble", "connected")
         self.log("BLE connected")
@@ -643,7 +654,10 @@ def main():
                             "Off by default to reduce controller battery use.")
     parser.add_argument("--idle-grace", type=float,
                         help="Seconds to keep BLE connected after a command "
-                            "for follow-up commands; default 120")
+                             "for follow-up commands; default 120")
+    parser.add_argument("--ble-connect-timeout", type=float,
+                        help="Seconds allowed for Windows/Bleak BLE connect; "
+                             "default 60")
     parser.add_argument("--reconnect-delay", type=float,
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -651,7 +665,8 @@ def main():
     for name in ("mqtt_host", "mqtt_port", "mqtt_username", "mqtt_password",
                  "mqtt_tls", "mqtt_client_id", "mqtt_timeout", "http_host",
                  "http_port", "prefix", "mac", "scan_time", "poll_interval",
-                 "keep_connected", "idle_grace", "reconnect_delay"):
+                 "keep_connected", "idle_grace", "ble_connect_timeout",
+                 "reconnect_delay"):
         if getattr(args, name) is None and name in config:
             setattr(args, name, config[name])
     args.mqtt_host = args.mqtt_host or ""
@@ -671,6 +686,11 @@ def main():
                        else DEFAULT_IDLE_GRACE)
     if args.idle_grace < 0:
         parser.error("--idle-grace cannot be negative")
+    args.ble_connect_timeout = (args.ble_connect_timeout
+                                if args.ble_connect_timeout is not None
+                                else DEFAULT_BLE_CONNECT_TIMEOUT)
+    if args.ble_connect_timeout <= 0:
+        parser.error("--ble-connect-timeout must be positive")
     args.reconnect_delay = (args.reconnect_delay
                             if args.reconnect_delay is not None else 10.0)
     if not args.mqtt_host:

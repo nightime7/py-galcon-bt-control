@@ -193,6 +193,11 @@ disconnects between polls unless `--keep-connected` is explicitly enabled.
 MQTT messages are retained so Home Assistant can restore the last known state
 while the bridge is disconnected.
 
+Windows/Bleak can take longer than usual to finish a BLE connection when the
+signal is weak. The bridge allows 60 seconds and retries once after the device
+has been found; adjust this with `--ble-connect-timeout` or
+`ble_connect_timeout` in `galcon_mqtt.json`.
+
 Zone commands are serialized so rapid Home Assistant actions cannot interleave
 BLE writes and status reads. The controller can report multiple active zones;
 the bridge publishes both a backwards-compatible `active_zone` value and an
