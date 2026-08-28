@@ -130,6 +130,19 @@ network access to your MQTT broker:
 python galcon_mqtt.py --mqtt-host homeassistant.local
 ```
 
+To avoid entering broker options each time, copy
+`galcon_mqtt.example.json` to `galcon_mqtt.json` and fill in the local broker
+settings. `galcon_mqtt.json` is gitignored and must never be committed:
+
+```powershell
+Copy-Item .\galcon_mqtt.example.json .\galcon_mqtt.json
+python galcon_mqtt.py
+```
+
+Command-line options override values from `galcon_mqtt.json`. The template
+defaults to command-only mode (`poll_interval: 0`), so the bridge connects to
+the controller only when Home Assistant sends a command or refresh request.
+
 An optional local HTTP API can be enabled for REST-based Home Assistant
 entities or diagnostics:
 

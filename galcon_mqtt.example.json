@@ -1,0 +1,17 @@
+{
+  "mqtt_host": "homeassistant.local",
+  "mqtt_port": 1883,
+  "mqtt_username": "your-mqtt-username",
+  "mqtt_password": "your-mqtt-password",
+  "mqtt_tls": false,
+  "mqtt_client_id": "galcon-gl6100-bridge",
+  "mqtt_timeout": 30,
+  "http_host": "127.0.0.1",
+  "http_port": 8765,
+  "prefix": "galcon_gl6100",
+  "mac": "",
+  "scan_time": 60,
+  "poll_interval": 0,
+  "keep_connected": false,
+  "reconnect_delay": 10
+}

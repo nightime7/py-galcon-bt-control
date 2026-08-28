@@ -26,6 +26,7 @@ import json
 import queue
 import threading
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from datetime import datetime, timezone
 
@@ -57,6 +58,7 @@ from control_galcon import (
 DEFAULT_PREFIX = "galcon_gl6100"
 ZONE_COUNT = 4
 DEFAULT_POLL_INTERVAL = 0
+MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
 
 
 def utc_now():
@@ -66,6 +68,14 @@ def utc_now():
 def version_tuple(value):
     return tuple(int(part) if part.isdigit() else 0
                  for part in str(value).lstrip("v").split("."))
+
+
+def load_mqtt_config(path=MQTT_CONFIG_PATH):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 class GalconMqttBridge:
@@ -537,30 +547,53 @@ class GalconMqttBridge:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mqtt-host", required=True)
-    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--mqtt-host")
+    parser.add_argument("--mqtt-port", type=int)
     parser.add_argument("--mqtt-username")
     parser.add_argument("--mqtt-password")
-    parser.add_argument("--mqtt-tls", action="store_true")
-    parser.add_argument("--mqtt-client-id", default="galcon-gl6100-bridge")
-    parser.add_argument("--mqtt-timeout", type=float, default=30.0)
-    parser.add_argument("--http-host", default="127.0.0.1")
-    parser.add_argument("--http-port", type=int, default=0,
+    parser.add_argument("--mqtt-tls", action="store_true", default=None)
+    parser.add_argument("--mqtt-client-id")
+    parser.add_argument("--mqtt-timeout", type=float)
+    parser.add_argument("--http-host")
+    parser.add_argument("--http-port", type=int,
                         help="Optional local HTTP API port; 0 disables it")
-    parser.add_argument("--prefix", default=DEFAULT_PREFIX)
-    parser.add_argument("--mac", default=None)
-    parser.add_argument("--scan-time", type=float, default=60.0)
+    parser.add_argument("--prefix")
+    parser.add_argument("--mac")
+    parser.add_argument("--scan-time", type=float)
     parser.add_argument("--poll-interval", type=float,
-                        default=DEFAULT_POLL_INTERVAL,
                         help="Enable background BLE polling at this many "
                             "seconds. Disabled by default; set 0 for "
                             "command-only on-demand connections.")
-    parser.add_argument("--keep-connected", action="store_true",
+    parser.add_argument("--keep-connected", action="store_true", default=None,
                         help="Keep BLE connected between polls/commands. "
                             "Off by default to reduce controller battery use.")
-    parser.add_argument("--reconnect-delay", type=float, default=10.0,
+    parser.add_argument("--reconnect-delay", type=float,
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
+    config = load_mqtt_config()
+    for name in ("mqtt_host", "mqtt_port", "mqtt_username", "mqtt_password",
+                 "mqtt_tls", "mqtt_client_id", "mqtt_timeout", "http_host",
+                 "http_port", "prefix", "mac", "scan_time", "poll_interval",
+                 "keep_connected", "reconnect_delay"):
+        if getattr(args, name) is None and name in config:
+            setattr(args, name, config[name])
+    args.mqtt_host = args.mqtt_host or ""
+    args.mqtt_port = args.mqtt_port if args.mqtt_port is not None else 1883
+    args.mqtt_client_id = args.mqtt_client_id or "galcon-gl6100-bridge"
+    args.mqtt_timeout = args.mqtt_timeout if args.mqtt_timeout is not None else 30.0
+    args.http_host = args.http_host or "127.0.0.1"
+    args.http_port = args.http_port if args.http_port is not None else 0
+    args.prefix = args.prefix or DEFAULT_PREFIX
+    args.scan_time = args.scan_time if args.scan_time is not None else 60.0
+    args.poll_interval = (args.poll_interval
+                          if args.poll_interval is not None
+                          else DEFAULT_POLL_INTERVAL)
+    args.keep_connected = bool(args.keep_connected)
+    args.reconnect_delay = (args.reconnect_delay
+                            if args.reconnect_delay is not None else 10.0)
+    if not args.mqtt_host:
+        parser.error("--mqtt-host is required (or set mqtt_host in "
+                     "galcon_mqtt.json)")
 
     async def runner():
         bridge = GalconMqttBridge(args)

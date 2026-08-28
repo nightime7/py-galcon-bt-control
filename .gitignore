@@ -1,6 +1,7 @@
 # Device-specific data - PIN and (optional) MAC address for your controller.
 # See galcon_device.example.json for the template.
 galcon_device.json
+galcon_mqtt.json
 
 # Python
 __pycache__/
