@@ -173,6 +173,10 @@ COMPACT_ZONE_PAIRS = {
     0x32: (3, 4),
 }
 
+# After closing one member of a pair, the surviving zone can briefly use this
+# compact single-zone form with its countdown in bytes 5-6.
+TRANSITIONAL_ZONE_CODES = {0x2f: 3, 0x3f: 4}
+
 
 def ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
@@ -204,6 +208,9 @@ def decode_active_zones(value: bytes):
     if status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < 4:
         zone = (status_byte & 0x0f) + 1
         return [(zone, value[2] * 60 + value[3])]
+    if status_byte in TRANSITIONAL_ZONE_CODES:
+        zone = TRANSITIONAL_ZONE_CODES[status_byte]
+        return [(zone, value[5] * 60 + value[6])]
     pair = COMPACT_ZONE_PAIRS.get(status_byte)
     if pair:
         return [(pair[0], value[2] * 60 + value[3]),
@@ -676,7 +683,8 @@ def decode_status(value: bytes, debug=False):
     byte0 is 0xff while idle. Active frames seen from different controller
     firmware revisions use 0xf0-0xf3 for one zone. The observed compact
     multi-zone form uses byte0=0x01 with zone 1 time at byte3 and zone 2 time
-    at byte6.
+    at byte6. During pair shutdown, 0x2f and 0x3f identify surviving zones 3
+    and 4 respectively, with their time at bytes 5-6.
 
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
