@@ -193,6 +193,12 @@ disconnects between polls unless `--keep-connected` is explicitly enabled.
 MQTT messages are retained so Home Assistant can restore the last known state
 while the bridge is disconnected.
 
+After an on-demand command connects to the controller, the BLE link remains
+open for 120 seconds by default in case another command follows. The timer
+resets with each command and can be changed with `--idle-grace <seconds>` or
+the `idle_grace` setting in `galcon_mqtt.json`. Set it to `0` to disconnect
+immediately after each command.
+
 For unattended operation, create a Windows Task Scheduler task that runs
 `galcon-mqtt.exe --mqtt-host <broker>` at user logon or system startup. Set
 the task to run whether or not a user is logged on. The MQTT bridge is

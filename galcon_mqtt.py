@@ -58,6 +58,7 @@ from control_galcon import (
 DEFAULT_PREFIX = "galcon_gl6100"
 ZONE_COUNT = 4
 DEFAULT_POLL_INTERVAL = 0
+DEFAULT_IDLE_GRACE = 120
 MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
 
 
@@ -96,6 +97,7 @@ class GalconMqttBridge:
         self.status_event = asyncio.Event()
         self.http_server = None
         self.last_device = None
+        self.idle_disconnect_task = None
 
     @property
     def prefix(self):
@@ -303,6 +305,27 @@ class GalconMqttBridge:
                 self.log(f"BLE disconnect failed: {exc}")
         self.client = None
 
+    def _reset_idle_disconnect(self):
+        if self.idle_disconnect_task is not None:
+            self.idle_disconnect_task.cancel()
+            self.idle_disconnect_task = None
+
+    def _arm_idle_disconnect(self):
+        if self.args.keep_connected:
+            return
+        self._reset_idle_disconnect()
+        self.idle_disconnect_task = asyncio.create_task(
+            self._disconnect_after_idle())
+
+    async def _disconnect_after_idle(self):
+        try:
+            await asyncio.sleep(self.args.idle_grace)
+            if self.client and self.client.is_connected:
+                self.log(f"BLE idle for {self.args.idle_grace:.0f}s; disconnecting")
+                await self._disconnect_ble()
+        except asyncio.CancelledError:
+            pass
+
     async def _connected_loop(self):
         while self.client and self.client.is_connected and not self.stop_event.is_set():
             await self._poll_status()
@@ -361,8 +384,10 @@ class GalconMqttBridge:
 
     async def _handle_mqtt(self, topic, payload):
         text = payload.decode("utf-8").strip()
-        await self._ensure_ble_connected()
+        if not self.args.keep_connected:
+            self._reset_idle_disconnect()
         try:
+            await self._ensure_ble_connected()
             if topic == self.topic("refresh"):
                 await self._poll_status()
                 await self._poll_programs()
@@ -398,7 +423,7 @@ class GalconMqttBridge:
                 await self._set_program(zone, text)
         finally:
             if not self.args.keep_connected:
-                await self._disconnect_ble()
+                self._arm_idle_disconnect()
 
     async def _set_zone(self, zone, value):
         if not 1 <= zone <= ZONE_COUNT:
@@ -535,6 +560,7 @@ class GalconMqttBridge:
 
     async def stop(self):
         self.stop_event.set()
+        self._reset_idle_disconnect()
         await self._disconnect_ble()
         if self.http_server:
             self.http_server.close()
@@ -567,6 +593,9 @@ def main():
     parser.add_argument("--keep-connected", action="store_true", default=None,
                         help="Keep BLE connected between polls/commands. "
                             "Off by default to reduce controller battery use.")
+    parser.add_argument("--idle-grace", type=float,
+                        help="Seconds to keep BLE connected after a command "
+                            "for follow-up commands; default 120")
     parser.add_argument("--reconnect-delay", type=float,
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -574,7 +603,7 @@ def main():
     for name in ("mqtt_host", "mqtt_port", "mqtt_username", "mqtt_password",
                  "mqtt_tls", "mqtt_client_id", "mqtt_timeout", "http_host",
                  "http_port", "prefix", "mac", "scan_time", "poll_interval",
-                 "keep_connected", "reconnect_delay"):
+                 "keep_connected", "idle_grace", "reconnect_delay"):
         if getattr(args, name) is None and name in config:
             setattr(args, name, config[name])
     args.mqtt_host = args.mqtt_host or ""
@@ -589,6 +618,11 @@ def main():
                           if args.poll_interval is not None
                           else DEFAULT_POLL_INTERVAL)
     args.keep_connected = bool(args.keep_connected)
+    args.idle_grace = (args.idle_grace
+                       if args.idle_grace is not None
+                       else DEFAULT_IDLE_GRACE)
+    if args.idle_grace < 0:
+        parser.error("--idle-grace cannot be negative")
     args.reconnect_delay = (args.reconnect_delay
                             if args.reconnect_delay is not None else 10.0)
     if not args.mqtt_host:
