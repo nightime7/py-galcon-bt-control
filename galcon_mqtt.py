@@ -56,7 +56,7 @@ from control_galcon import (
 
 DEFAULT_PREFIX = "galcon_gl6100"
 ZONE_COUNT = 4
-DEFAULT_POLL_INTERVAL = 15 * 60
+DEFAULT_POLL_INTERVAL = 0
 
 
 def utc_now():
@@ -538,9 +538,9 @@ def main():
     parser.add_argument("--scan-time", type=float, default=60.0)
     parser.add_argument("--poll-interval", type=float,
                         default=DEFAULT_POLL_INTERVAL,
-                        help="Seconds between background BLE polls; default "
-                            "900 (15 minutes). Set 0 for command-only "
-                            "on-demand connections.")
+                        help="Enable background BLE polling at this many "
+                            "seconds. Disabled by default; set 0 for "
+                            "command-only on-demand connections.")
     parser.add_argument("--keep-connected", action="store_true",
                         help="Keep BLE connected between polls/commands. "
                             "Off by default to reduce controller battery use.")
