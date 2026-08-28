@@ -162,6 +162,17 @@ CHAR_POLL = "20900106-bdee-493a-aa74-a8137c9d43f0"
 
 STATUS_POLL = bytes([0x02, 0x00])
 
+# Compact status frames observed when two zones run together. The high nibble
+# identifies the higher-numbered zone and the low nibble the lower zone minus 1.
+COMPACT_ZONE_PAIRS = {
+    0x01: (1, 2),
+    0x20: (1, 3),
+    0x21: (2, 3),
+    0x30: (1, 4),
+    0x31: (2, 4),
+    0x32: (3, 4),
+}
+
 
 def ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
@@ -181,6 +192,23 @@ def hexdump(data) -> str:
 def pin_to_bytes(pin: str) -> bytes:
     """PIN 1234 -> b'\\x01\\x02\\x03\\x04' (raw digits, as the 9001BT expects)."""
     return bytes(int(c) for c in pin)
+
+
+def decode_active_zones(value: bytes):
+    """Return [(zone, remaining_seconds)] for a status frame, or None."""
+    if not value or len(value) < 7:
+        return None
+    status_byte = value[0]
+    if status_byte == 0xff:
+        return []
+    if status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < 4:
+        zone = (status_byte & 0x0f) + 1
+        return [(zone, value[2] * 60 + value[3])]
+    pair = COMPACT_ZONE_PAIRS.get(status_byte)
+    if pair:
+        return [(pair[0], value[2] * 60 + value[3]),
+                (pair[1], value[5] * 60 + value[6])]
+    return None
 
 
 def _load_device_config() -> dict:
@@ -661,16 +689,8 @@ def decode_status(value: bytes, debug=False):
         return
     
     status_byte = value[0]
-    if status_byte == 0xff:
-        active_zones = []
-    elif status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < 4:
-        active_zones = [(status_byte & 0x0f) + 1]
-    elif 0 < status_byte <= 4:
-        active_zones = [status_byte]
-        if status_byte == 1 and len(value) > 6 and value[6] > 0:
-            active_zones.append(2)
-    else:
-        active_zones = None
+    zone_times = decode_active_zones(value)
+    active_zones = None if zone_times is None else [zone for zone, _ in zone_times]
 
     if active_zones == []:
         status_str = "IDLE"
@@ -684,12 +704,11 @@ def decode_status(value: bytes, debug=False):
     print(f"       ║ STATUS: {status_str:<31}║")
     print(f"       ╠{'═' * 40}╣")
     
-    if active_zones:
-        mins = value[2]
-        secs = value[3]
-        total_seconds = mins * 60 + secs
-        time_str = f"{mins:2d}m {secs:02d}s ({total_seconds:3d}s total)"
-        print(f"       ║ Time remaining: {time_str:<23}║")
+    if zone_times:
+        for zone, total_seconds in zone_times:
+            mins, secs = divmod(total_seconds, 60)
+            time_str = f"Zone {zone}: {mins:2d}m {secs:02d}s ({total_seconds:3d}s)"
+            print(f"       ║ {time_str:<39}║")
     
     print(f"       ╚{'═' * 40}╝")
     

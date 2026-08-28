@@ -46,6 +46,7 @@ from control_galcon import (
     build_open_payload,
     build_rainoff_payload,
     build_seasonal_payload,
+    decode_active_zones,
     find_device,
     load_saved_mac,
     load_saved_pin,
@@ -366,25 +367,14 @@ class GalconMqttBridge:
     def _publish_status(self, value):
         if not value or not any(value):
             return
-        status_byte = value[0]
-        if status_byte == 0xff:
+        zone_times = decode_active_zones(value)
+        if zone_times == []:
             self.active_zone = None
             self.active_zones = []
             self.remaining_by_zone = {}
             self.remaining_seconds = 0
-        elif status_byte & 0xf0 == 0xf0 and status_byte & 0x0f < ZONE_COUNT:
-            self.active_zones = [(status_byte & 0x0f) + 1]
-            self.active_zone = self.active_zones[0]
-            self.remaining_seconds = value[2] * 60 + value[3]
-            self.remaining_by_zone = {self.active_zone: self.remaining_seconds}
-        elif 0 < status_byte <= ZONE_COUNT:
-            self.active_zone = status_byte
-            self.remaining_by_zone = {
-                self.active_zone: value[2] * 60 + value[3]
-            }
-            if (self.active_zone == 1 and len(value) > 6
-                    and value[6] > 0):
-                self.remaining_by_zone[2] = value[5] * 60 + value[6]
+        elif zone_times is not None:
+            self.remaining_by_zone = dict(zone_times)
             self.active_zones = [zone for zone, seconds
                                  in self.remaining_by_zone.items()
                                  if seconds > 0]
@@ -395,11 +385,11 @@ class GalconMqttBridge:
                 self.active_zone = None
                 self.remaining_seconds = 0
         else:
-            self.log(f"Ignoring invalid status frame zone byte 0x{status_byte:02x}")
+            self.log(f"Ignoring invalid status frame zone byte 0x{value[0]:02x}")
             self._publish("status", "unknown")
             self._publish("active_zone", 0)
             self._publish("active_zones", "[]")
-            self._publish("error", f"Invalid status frame: 0x{status_byte:02x}")
+            self._publish("error", f"Invalid status frame: 0x{value[0]:02x}")
             return
         self.last_status_at = time.monotonic()
         active = self.active_zone
