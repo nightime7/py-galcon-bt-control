@@ -173,6 +173,7 @@ COMPACT_ZONE_PAIRS = {
     0x30: (1, 4),
     0x31: (2, 4),
     0x32: (3, 4),
+    0x23: (3, 4),
 }
 
 # After closing one member of a pair, the surviving zone can briefly use this
