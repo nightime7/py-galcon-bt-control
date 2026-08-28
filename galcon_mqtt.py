@@ -99,7 +99,15 @@ class GalconMqttBridge:
 
     async def start(self):
         self._start_mqtt()
-        await asyncio.wait_for(self.mqtt_connected.wait(), self.args.mqtt_timeout)
+        try:
+            await asyncio.wait_for(self.mqtt_connected.wait(), self.args.mqtt_timeout)
+        except asyncio.TimeoutError as exc:
+            if self.mqtt:
+                self.mqtt.loop_stop()
+                self.mqtt.disconnect()
+            raise RuntimeError(
+                f"MQTT broker did not respond within {self.args.mqtt_timeout:.0f}s. "
+                f"Check --mqtt-host, --mqtt-port, credentials, and TLS settings.") from exc
         self._publish_discovery()
         if self.args.http_port:
             self.http_server = await asyncio.start_server(
@@ -145,14 +153,15 @@ class GalconMqttBridge:
             return 200, {str(zone): self._program_json(record)
                          for zone, record in self.programs.items()}
         if method == "POST" and path == "/api/refresh":
-            asyncio.create_task(self._poll_status())
-            asyncio.create_task(self._poll_programs())
+            asyncio.create_task(self._handle_mqtt(
+                self.topic("refresh"), b"refresh"))
             return 202, {"accepted": True}
         if method == "POST" and path.startswith("/api/zone/") and path.endswith("/set"):
             zone = int(path.split("/")[3])
             command = json.loads(body.decode("utf-8")) if body else {}
             value = command.get("command", "") if isinstance(command, dict) else command
-            asyncio.create_task(self._set_zone(zone, str(value)))
+            asyncio.create_task(self._handle_mqtt(
+                self.topic(f"zone/{zone}/set"), str(value).encode()))
             return 202, {"accepted": True, "zone": zone}
         if method == "POST" and path == "/api/device/seasonal":
             value = int(json.loads(body.decode("utf-8")).get("value"))
@@ -288,6 +297,11 @@ class GalconMqttBridge:
         while self.client and self.client.is_connected and not self.stop_event.is_set():
             await self._poll_status()
             await asyncio.sleep(self.args.poll_interval)
+
+    async def _ensure_ble_connected(self):
+        if self.client and self.client.is_connected:
+            return
+        await self._connect_ble()
 
     def _on_status_notify(self, _sender, data):
         self.status = bytes(data)
@@ -559,6 +573,9 @@ def main():
         asyncio.run(runner())
     except KeyboardInterrupt:
         print("\nStopped.")
+    except RuntimeError as exc:
+        print(f"MQTT bridge startup failed: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
