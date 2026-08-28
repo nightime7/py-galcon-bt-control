@@ -19,6 +19,8 @@ the module docstring in `control_galcon.py` for full protocol notes.
 - `galcon_mqtt.py` - a headless MQTT bridge with Home Assistant MQTT
     Discovery, battery-friendly BLE connection/reconnect, status polling, zone
     controls, and program/device setting topics.
+- `galcon_mqtt_tray.py` - a Windows notification-area host for the bridge,
+    with live MQTT/controller status and a Quit command.
 
 ## Install
 
@@ -30,8 +32,14 @@ and run it. Python does **not** need to be installed - the MSI bundles its
 own interpreter and all dependencies.
 
 The installer adds Start Menu and Desktop shortcuts for the GUI, and also
-installs `galcon-cli.exe` and `galcon-mqtt.exe` alongside it for command-line
-and Home Assistant use.
+installs `galcon-cli.exe`, `galcon-mqtt.exe`, and `GalconMqttTray.exe`
+alongside it for command-line and Home Assistant use. It adds the tray bridge
+to the Windows Startup folder for an all-users installation, so it starts
+minimized in the notification area after Windows sign-in.
+
+Right-click the Galcon tray icon to see MQTT/controller connection status,
+currently active zones, or quit the bridge. The tray bridge reads the same
+`galcon_mqtt.json` configuration as the command-line bridge.
 
 The installer uses the standard Windows MSI flow, including a GPL-3.0 license
 agreement page, an install-folder chooser, an all-users installation option,
@@ -132,11 +140,19 @@ python galcon_mqtt.py --mqtt-host homeassistant.local
 
 To avoid entering broker options each time, copy
 `galcon_mqtt.example.json` to `galcon_mqtt.json` and fill in the local broker
-settings. `galcon_mqtt.json` is gitignored and must never be committed:
+settings. `galcon_mqtt.json` is gitignored and must never be committed. The
+installed MSI looks first in `%APPDATA%\Galcon GL6100 Control`; source runs
+also accept the file beside the Python script:
 
 ```powershell
 Copy-Item .\galcon_mqtt.example.json .\galcon_mqtt.json
 python galcon_mqtt.py
+```
+
+For an installed copy, place the completed file at:
+
+```text
+%APPDATA%\Galcon GL6100 Control\galcon_mqtt.json
 ```
 
 Command-line options override values from `galcon_mqtt.json`. The template

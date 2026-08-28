@@ -3,7 +3,8 @@ Builds a Windows MSI installer for the Galcon GL6100 control tools.
 
 The MSI bundles a private copy of Python plus all dependencies, so end users
 do not need Python installed. It installs both the GUI and the CLI, and
-creates Start Menu and Desktop shortcuts for the GUI.
+creates Start Menu and Desktop shortcuts for the GUI plus a Startup shortcut
+for the minimized MQTT tray bridge.
 
 cx_Freeze builds for the architecture of the interpreter running it - an x64
 Python produces an x64 MSI, an ARM64 Python produces an ARM64 MSI. There is
@@ -44,14 +45,18 @@ include_files = [
     (str(ROOT / "README.md"), "README.md"),
     (str(ROOT / "LICENSE"), "LICENSE"),
     (str(ROOT / "galcon_device.example.json"), "galcon_device.example.json"),
+    (str(ROOT / "galcon.ico"), "galcon.ico"),
 ]
 
 build_exe_options = {
-    "packages": ["asyncio", "bleak", "paho", "tkinter", "queue", "threading", "json"],
+    "packages": ["asyncio", "bleak", "paho", "pystray", "PIL", "tkinter",
+                 "queue", "threading", "json"],
     "includes": [
         "control_galcon",
         "http",
         "http.client",
+        "PIL.Image",
+        "pystray._win32",
         "urllib.error",
         "urllib.request",
     ],
@@ -86,6 +91,20 @@ shortcut_table = [
         None,
         None,
         None,
+        None,
+        "TARGETDIR",
+    ),
+    (
+        "StartupTrayShortcut",
+        "StartupFolder",
+        "Galcon MQTT Bridge",
+        "TARGETDIR",
+        "[TARGETDIR]GalconMqttTray.exe",
+        None,
+        "Start the Galcon MQTT bridge in the notification area",
+        None,
+        "[TARGETDIR]galcon.ico",
+        0,
         None,
         "TARGETDIR",
     ),
@@ -126,6 +145,13 @@ executables = [
         script=str(ROOT / "galcon_mqtt.py"),
         base=None,
         target_name="galcon-mqtt.exe",
+        copyright="Copyright (C) 2026",
+    ),
+    Executable(
+        script=str(ROOT / "galcon_mqtt_tray.py"),
+        base="Win32GUI",
+        target_name="GalconMqttTray.exe",
+        icon=str(ROOT / "galcon.ico"),
         copyright="Copyright (C) 2026",
     ),
 ]

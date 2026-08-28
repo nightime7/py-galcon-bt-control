@@ -23,7 +23,9 @@ Command topics:
 import argparse
 import asyncio
 import json
+import os
 import queue
+import sys
 import threading
 import time
 from pathlib import Path
@@ -61,7 +63,9 @@ ZONE_COUNT = 4
 DEFAULT_POLL_INTERVAL = 0
 DEFAULT_IDLE_GRACE = 120
 DEFAULT_BLE_CONNECT_TIMEOUT = 60
-MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
+APP_CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Galcon GL6100 Control"
+MQTT_CONFIG_PATH = APP_CONFIG_DIR / "galcon_mqtt.json"
+LEGACY_MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
 
 
 def utc_now():
@@ -74,11 +78,18 @@ def version_tuple(value):
 
 
 def load_mqtt_config(path=MQTT_CONFIG_PATH):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    paths = [path]
+    if path == MQTT_CONFIG_PATH:
+        paths.extend([LEGACY_MQTT_CONFIG_PATH,
+                      Path(sys.executable).with_name("galcon_mqtt.json")])
+    for candidate in dict.fromkeys(paths):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
 class GalconMqttBridge:

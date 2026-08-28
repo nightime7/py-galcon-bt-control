@@ -1,2 +1,4 @@
 bleak
 paho-mqtt
+pystray
+Pillow
