@@ -551,20 +551,21 @@ class GalconMqttBridge:
         if days & 0x80:
             payload["start_in_days"] = max(0, record[13] - 0x80)
             payload["cadence_days"] = max(0, record[14] - 0xc0)
+        next_run = self._next_program_run(record)
+        payload["mode"] = payload["mode"] if next_run else "off"
         self._publish(f"zone/{zone}/program/details", json.dumps(payload))
         self._publish(f"zone/{zone}/program", payload["mode"])
         self._publish(f"zone/{zone}/program/duration", payload["duration_minutes"])
-        next_run = self._next_program_run(record)
         self._publish(f"zone/{zone}/program/next_run",
-                      next_run.isoformat() if next_run else "unknown")
+                      next_run.isoformat() if next_run else "off")
 
     def _next_program_run(self, record):
         now = datetime.now().astimezone().replace(second=0, microsecond=0)
-        hour, minute = record[5], record[6]
-        if hour == 0xff or hour > 23 or minute > 59:
-            return None
-        start_time = now.replace(hour=hour, minute=minute)
         if record[4] & 0x80:
+            hour, minute = record[5], record[6]
+            if hour == 0xff or hour > 23 or minute > 59:
+                return None
+            start_time = now.replace(hour=hour, minute=minute)
             offset = max(0, record[13] - 0x80)
             cadence = max(1, record[14] - 0xc0)
             candidate = start_time + timedelta(days=offset)
@@ -573,11 +574,16 @@ class GalconMqttBridge:
             return candidate
 
         candidates = []
-        for day_offset in range(8):
-            candidate = start_time + timedelta(days=day_offset)
-            sunday_first = (candidate.weekday() + 1) % 7
-            if record[4] & (1 << sunday_first) and candidate > now:
-                candidates.append(candidate)
+        for pos in (5, 7, 9, 11):
+            hour, minute = record[pos], record[pos + 1]
+            if hour == 0xff or hour > 23 or minute > 59:
+                continue
+            start_time = now.replace(hour=hour, minute=minute)
+            for day_offset in range(8):
+                candidate = start_time + timedelta(days=day_offset)
+                sunday_first = (candidate.weekday() + 1) % 7
+                if record[4] & (1 << sunday_first) and candidate > now:
+                    candidates.append(candidate)
         return min(candidates) if candidates else None
 
     def _publish_discovery(self):
