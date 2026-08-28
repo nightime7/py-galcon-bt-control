@@ -166,6 +166,8 @@ STATUS_POLL = bytes([0x02, 0x00])
 # identifies the higher-numbered zone and the low nibble the lower zone minus 1.
 COMPACT_ZONE_PAIRS = {
     0x01: (1, 2),
+    # Zone 1 + zone 2 also appears as 0x10 when started in that order.
+    0x10: (1, 2),
     0x20: (1, 3),
     0x21: (2, 3),
     0x30: (1, 4),
