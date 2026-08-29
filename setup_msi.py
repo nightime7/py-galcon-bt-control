@@ -3,8 +3,8 @@ Builds a Windows MSI installer for the Galcon GL6100 control tools.
 
 The MSI bundles a private copy of Python plus all dependencies, so end users
 do not need Python installed. It installs both the GUI and the CLI, and
-creates Start Menu and Desktop shortcuts for the GUI plus a Startup shortcut
-for the minimized MQTT tray bridge.
+creates Start Menu and Desktop shortcuts. Windows startup for the MQTT tray
+bridge is controlled from the tray menu for the current user.
 
 cx_Freeze builds for the architecture of the interpreter running it - an x64
 Python produces an x64 MSI, an ARM64 Python produces an ARM64 MSI. There is
@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from cx_Freeze import Executable, setup
+from cx_Freeze.command.bdist_msi import PyDialog, add_data, bdist_msi
 
 sys.path.insert(0, str(Path(__file__).parent))
 from control_galcon import APP_VERSION  # noqa: E402
@@ -34,6 +35,89 @@ SHORTCUT_NAME = "Galcon GL6100 Control"
 UPGRADE_CODE = "{6F3A1C24-9B5E-4D77-9E31-2A8C4B0D77E1}"
 
 ROOT = Path(__file__).parent
+
+
+class GalconBdistMsi(bdist_msi):
+    def add_exit_dialog(self):
+        dialog = PyDialog(
+            self.db,
+            "ExitDialog",
+            x=self.x,
+            y=self.y,
+            w=self.width,
+            h=self.height,
+            attr=self.modal,
+            title=self.title,
+            first="Finish",
+            default="Finish",
+            cancel="Finish",
+        )
+        dialog.title("Completing the [ProductName] installer")
+        add_data(
+            self.db,
+            "ControlCondition",
+            [
+                ("ExitDialog", "LaunchMqttOnFinish", "Hide",
+                 'MaintenanceForm_Action="Remove"'),
+                ("ExitDialog", "LaunchOnFinish", "Hide",
+                 'MaintenanceForm_Action="Remove"'),
+            ],
+        )
+        dialog.checkbox(
+            "LaunchMqttOnFinish",
+            15,
+            180,
+            300,
+            20,
+            3,
+            "LAUNCHMQTT",
+            "Run Galcon MQTT Bridge in the notification area",
+            "LaunchOnFinish",
+        )
+        dialog.checkbox(
+            "LaunchOnFinish",
+            15,
+            200,
+            300,
+            20,
+            3,
+            "LAUNCHAPP",
+            "Launch the Galcon control GUI on finish",
+            "Finish",
+        )
+        add_data(
+            self.db,
+            "ControlEvent",
+            [
+                ("ExitDialog", "Finish", "DoAction", "VSDCA_Launch",
+                 "LAUNCHAPP=1", 1),
+                ("ExitDialog", "Finish", "DoAction", "VSDCA_LaunchMqtt",
+                 "LAUNCHMQTT=1", 2),
+            ],
+        )
+        add_data(
+            self.db,
+            "CustomAction",
+            [
+                ("VSDCA_Launch", 226, "TARGETDIR",
+                 "[TARGETDIR]GalconControlGUI.exe"),
+                ("VSDCA_LaunchMqtt", 226, "TARGETDIR",
+                 "[TARGETDIR]GalconMqttTray.exe"),
+            ],
+        )
+        dialog.backbutton("< Back", "LaunchMqttOnFinish", active=False)
+        dialog.cancelbutton("Cancel", "Back", active=False)
+        dialog.text(
+            "Description",
+            15,
+            235,
+            320,
+            20,
+            0x30003,
+            "Click the Finish button to exit the installer.",
+        )
+        button = dialog.nextbutton("Finish", "Cancel", name="Finish")
+        button.event("EndDialog", "Return", "1", 3)
 
 ARCH_TAG = {
     "AMD64": "x64",
@@ -56,6 +140,7 @@ build_exe_options = {
         "http",
         "http.client",
         "PIL.Image",
+        "PIL.ImageTk",
         "pystray._win32",
         "urllib.error",
         "urllib.request",
@@ -95,13 +180,13 @@ shortcut_table = [
         "TARGETDIR",
     ),
     (
-        "StartupTrayShortcut",
-        "StartupFolder",
+        "StartMenuTrayShortcut",
+        "ProgramMenuFolder",
         "Galcon MQTT Bridge",
         "TARGETDIR",
         "[TARGETDIR]GalconMqttTray.exe",
         None,
-        "Start the Galcon MQTT bridge in the notification area",
+        "Run the Galcon MQTT bridge in the notification area",
         None,
         "[TARGETDIR]galcon.ico",
         0,
@@ -133,6 +218,7 @@ executables = [
         script=str(ROOT / "galcon_gui.py"),
         base="Win32GUI",
         target_name="GalconControlGUI.exe",
+        icon=str(ROOT / "galcon.ico"),
         copyright="Copyright (C) 2026",
     ),
     Executable(
@@ -164,5 +250,6 @@ setup(
         "build_exe": build_exe_options,
         "bdist_msi": bdist_msi_options,
     },
+    cmdclass={"bdist_msi": GalconBdistMsi},
     executables=executables,
 )

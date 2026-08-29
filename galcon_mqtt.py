@@ -63,6 +63,7 @@ ZONE_COUNT = 4
 DEFAULT_POLL_INTERVAL = 0
 DEFAULT_IDLE_GRACE = 120
 DEFAULT_BLE_CONNECT_TIMEOUT = 60
+BLE_IDLE_KEEPALIVE_INTERVAL = 15
 APP_CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Galcon GL6100 Control"
 MQTT_CONFIG_PATH = APP_CONFIG_DIR / "galcon_mqtt.json"
 LEGACY_MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
@@ -99,6 +100,9 @@ class GalconMqttBridge:
         self.mqtt = None
         self.mqtt_connected = asyncio.Event()
         self.client = None
+        self.ble_state = "disconnected"
+        self.state_change_callback = None
+        self.log_callback = None
         self.device = None
         self.status = bytes([0xff]) + bytes(19)
         self.programs = {}
@@ -120,7 +124,14 @@ class GalconMqttBridge:
         return self.args.prefix.rstrip("/")
 
     def log(self, message):
-        print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
+        line = f"[{datetime.now():%H:%M:%S}] {message}"
+        if self.log_callback is not None:
+            try:
+                self.log_callback(line)
+            except Exception:  # noqa: BLE001
+                pass
+        if sys.stdout is not None:
+            print(line, flush=True)
 
     def topic(self, suffix):
         return f"{self.prefix}/{suffix}"
@@ -144,8 +155,6 @@ class GalconMqttBridge:
         if self.args.initial_refresh:
             self.log("Collecting initial controller status and programs...")
             await self._handle_mqtt(self.topic("refresh"), b"startup")
-            self._reset_idle_disconnect()
-            await self._disconnect_ble()
         await self._ble_loop()
 
     async def _handle_http(self, reader, writer):
@@ -250,7 +259,7 @@ class GalconMqttBridge:
             self.log(f"MQTT connection failed: {reason_code}")
             return
         self.log(f"MQTT connected to {self.args.mqtt_host}:{self.args.mqtt_port}")
-        self.mqtt_connected.set()
+        self.loop.call_soon_threadsafe(self.mqtt_connected.set)
         self.mqtt.subscribe(self.topic("zone/+/set"), qos=1)
         self.mqtt.subscribe(self.topic("zone/+/program/set"), qos=1)
         self.mqtt.subscribe(self.topic("device/seasonal/set"), qos=1)
@@ -259,6 +268,10 @@ class GalconMqttBridge:
         self.mqtt.publish(self.topic("availability"), "online", qos=1, retain=True)
 
     def _on_mqtt_message(self, _client, _userdata, message):
+        if message.retain:
+            self.log(f"Ignoring retained MQTT command on {message.topic}")
+            return
+        self.log(f"MQTT command received on {message.topic}")
         future = asyncio.run_coroutine_threadsafe(
             self._handle_mqtt(message.topic, message.payload), self.loop)
         future.add_done_callback(self._log_future_error)
@@ -288,7 +301,7 @@ class GalconMqttBridge:
             except Exception as exc:  # noqa: BLE001
                 self.log(f"BLE session failed: {type(exc).__name__}: {exc}")
                 self._publish("error", f"{type(exc).__name__}: {exc}")
-                self._publish("ble", "disconnected")
+                self._set_ble_state("disconnected")
             finally:
                 await self._disconnect_ble()
             await asyncio.sleep(self.args.poll_interval)
@@ -296,14 +309,15 @@ class GalconMqttBridge:
     async def _connect_ble(self, load_programs=True):
         if self.client and self.client.is_connected:
             return
-        self._publish("ble", "scanning")
+        self._set_ble_state("scanning")
         mac = self.args.mac or load_saved_mac()
         if self.last_device is not None:
             try:
                 self.device = self.last_device
-                self._publish("ble", "connecting")
+                self._set_ble_state("connecting")
                 self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
                     self.device, timeout=self.args.ble_connect_timeout,
+                    disconnected_callback=self._on_ble_disconnected,
                     services=[SERVICE_UUID],
                     winrt=dict(use_cached_services=True))
                 await self.client.connect()
@@ -312,15 +326,17 @@ class GalconMqttBridge:
                 self.client = None
 
         if self.client is None:
+            self._set_ble_state("scanning")
             self.device = await find_device(self.args.scan_time, mac=mac)
             if self.device is None:
                 raise RuntimeError("Controller not found; press a controller button to wake it")
             self.last_device = self.device
-            self._publish("ble", "connecting")
+            self._set_ble_state("connecting")
             last_error = None
             for attempt in range(2):
                 self.client = __import__("bleak", fromlist=["BleakClient"]).BleakClient(
                     self.device, timeout=self.args.ble_connect_timeout,
+                    disconnected_callback=self._on_ble_disconnected,
                     services=[SERVICE_UUID],
                     winrt=dict(use_cached_services=True))
                 try:
@@ -335,8 +351,7 @@ class GalconMqttBridge:
             else:
                 raise last_error
         await self.client.start_notify(CHAR_STATUS, self._on_status_notify)
-        self._publish("ble", "connected")
-        self.log("BLE connected")
+        self._set_ble_state("connected")
         await self._poll_status()
         if load_programs:
             await self._poll_programs()
@@ -348,6 +363,16 @@ class GalconMqttBridge:
                 await client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 self.log(f"BLE disconnect failed: {exc}")
+        self._set_ble_state("disconnected")
+
+    def _on_ble_disconnected(self, client):
+        self.loop.call_soon_threadsafe(self._handle_ble_disconnected, client)
+
+    def _handle_ble_disconnected(self, client):
+        if self.client is client:
+            self.client = None
+            self.log("BLE link was closed by the controller or Windows")
+            self._set_ble_state("disconnected")
 
     def _reset_idle_disconnect(self):
         if self.idle_disconnect_task is not None:
@@ -360,15 +385,29 @@ class GalconMqttBridge:
         self._reset_idle_disconnect()
         self.idle_disconnect_task = asyncio.create_task(
             self._disconnect_after_idle())
+        if self.client and self.client.is_connected:
+            self.log(f"BLE idle disconnect scheduled in "
+                     f"{self.args.idle_grace:.0f}s")
 
     async def _disconnect_after_idle(self):
         try:
-            await asyncio.sleep(self.args.idle_grace)
-            if self.client and self.client.is_connected:
+            deadline = self.loop.time() + self.args.idle_grace
+            while self.client is not None:
+                remaining = deadline - self.loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(BLE_IDLE_KEEPALIVE_INTERVAL, remaining))
+                if self.client is not None and self.client.is_connected \
+                        and self.loop.time() < deadline:
+                    await self._poll_status()
+            if self.client is not None:
                 self.log(f"BLE idle for {self.args.idle_grace:.0f}s; disconnecting")
                 await self._disconnect_ble()
         except asyncio.CancelledError:
             pass
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"BLE keepalive failed: {type(exc).__name__}: {exc}")
+            await self._disconnect_ble()
 
     async def _connected_loop(self):
         while self.client and self.client.is_connected and not self.stop_event.is_set():
@@ -448,16 +487,16 @@ class GalconMqttBridge:
 
     async def _handle_mqtt(self, topic, payload):
         text = payload.decode("utf-8").strip()
+        retain_ble = False
         if not self.args.keep_connected:
             self._reset_idle_disconnect()
         try:
             async with self.request_lock:
-                await self._ensure_ble_connected(
-                    load_programs=topic == self.topic("refresh")
-                    or topic.endswith("/program/set"))
+                await self._ensure_ble_connected()
                 if topic == self.topic("refresh"):
                     await self._poll_status()
                     await self._poll_programs()
+                    self.log("Controller status and programs refreshed")
                     return
                 if topic == self.topic("device/seasonal/set"):
                     value = int(text)
@@ -468,6 +507,7 @@ class GalconMqttBridge:
                                          build_seasonal_payload(value),
                                          f"SEASONAL {value}%")
                     self._publish("device/seasonal", value)
+                    retain_ble = True
                     return
                 if topic == self.topic("device/rainoff/set"):
                     value = int(text)
@@ -478,19 +518,25 @@ class GalconMqttBridge:
                                          build_rainoff_payload(value),
                                          f"RAIN OFF {value} days")
                     self._publish("device/rainoff", value)
+                    retain_ble = True
                     return
                 parts = topic.split("/")
                 if len(parts) >= 3 and parts[-1] == "set" and parts[-2].isdigit():
                     zone = int(parts[-2])
                     if parts[-3] == "zone":
                         await self._set_zone(zone, text)
+                        retain_ble = True
                         return
                 if len(parts) >= 4 and parts[-2:] == ["program", "set"]:
                     zone = int(parts[-3])
                     await self._set_program(zone, text)
+                    retain_ble = True
         finally:
             if not self.args.keep_connected and not self.stop_event.is_set():
-                self._arm_idle_disconnect()
+                if retain_ble:
+                    self._arm_idle_disconnect()
+                else:
+                    await self._disconnect_ble()
 
     async def _set_zone(self, zone, value):
         if not 1 <= zone <= ZONE_COUNT:
@@ -676,6 +722,18 @@ class GalconMqttBridge:
     def _publish(self, suffix, payload):
         if self.mqtt is not None:
             self.mqtt.publish(self.topic(suffix), str(payload), qos=1, retain=True)
+
+    def _set_ble_state(self, state):
+        if state == self.ble_state:
+            return
+        self.ble_state = state
+        self.log(f"BLE {state}")
+        self._publish("ble", state)
+        if self.state_change_callback is not None:
+            try:
+                self.state_change_callback()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"State display update failed: {exc}")
 
     async def stop(self):
         self.stop_event.set()

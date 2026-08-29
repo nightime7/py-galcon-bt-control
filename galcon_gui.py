@@ -1,6 +1,7 @@
 import asyncio
 import json
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -46,6 +47,9 @@ DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 WINDOW_POSITIONS = (5, 7, 9, 11)
 ZONE_IDLE_COLOR = "#9ca3af"
 ZONE_ACTIVE_COLOR = "#16a34a"
+ROOT = (Path(sys.executable).parent if getattr(sys, "frozen", False)
+    else Path(__file__).parent)
+ICON_PATH = ROOT / "galcon.ico"
 
 
 def _version_tuple(text):
@@ -361,6 +365,7 @@ class GalconGui(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Galcon GL6100 Control")
+        self.iconbitmap(default=str(ICON_PATH))
         self.geometry("1240x760")
         self.minsize(1080, 660)
         self.ui_queue = queue.Queue()

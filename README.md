@@ -33,13 +33,28 @@ own interpreter and all dependencies.
 
 The installer adds Start Menu and Desktop shortcuts for the GUI, and also
 installs `galcon-cli.exe`, `galcon-mqtt.exe`, and `GalconMqttTray.exe`
-alongside it for command-line and Home Assistant use. It adds the tray bridge
-to the Windows Startup folder for an all-users installation, so it starts
-minimized in the notification area after Windows sign-in.
+alongside it for command-line and Home Assistant use.
+
+The Start Menu also includes a **Galcon MQTT Bridge** shortcut. Right-clicking
+the running tray icon includes a **Start with Windows** option that controls
+startup for the current user. Turning it off also removes legacy Startup-folder
+shortcuts created by earlier installer versions.
+
+The installer's final page has separate checkboxes for launching the control
+GUI and running the MQTT bridge. Both options are unchecked by default; the
+MQTT bridge requires broker configuration before it can connect.
+
+Installing a newer MSI over an existing installation performs an in-place
+upgrade: Windows Installer removes the older product first, then installs the
+new version while preserving configuration stored under the user's AppData.
 
 Right-click the Galcon tray icon to see MQTT/controller connection status,
-currently active zones, or quit the bridge. The tray bridge reads the same
-`galcon_mqtt.json` configuration as the command-line bridge.
+currently active zones, open the **Configure MQTT...** form, toggle **Start
+with Windows**, or quit the bridge. The configuration form edits every bridge
+setting and saves the same `galcon_mqtt.json` file used by the command-line
+bridge. Restart the tray app after saving to apply connection settings.
+Double-click the tray icon, or choose **Show Log...**, to open a live window
+containing the same timestamped bridge activity shown by the CLI.
 
 The installer uses the standard Windows MSI flow, including a GPL-3.0 license
 agreement page, an install-folder chooser, an all-users installation option,
@@ -203,15 +218,19 @@ galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
 Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
 `cadence`, and `start_in`. By default the bridge does not connect to the
 controller or perform background polling. It connects only when Home
-Assistant sends a command or refresh request, then disconnects after it
-finishes. It also performs one initial status/program collection at startup
-so Home Assistant entities are populated immediately. Use
+Assistant sends a command or refresh request. Passive status/program reads,
+including the initial collection at startup, disconnect immediately when the
+read completes. Successful set commands use the configured `idle_grace`
+period (120 seconds by default), and each new set command restarts that timer.
+The live log reports when the timer is scheduled and when BLE disconnects. The
+initial collection populates Home Assistant entities immediately. Use
 `--no-initial-refresh` or `initial_refresh: false` to skip that one connection.
 To enable repeating polling, explicitly provide an interval, for
 example `--poll-interval 900` for one poll every 15 minutes. The bridge
 disconnects between polls unless `--keep-connected` is explicitly enabled.
-MQTT messages are retained so Home Assistant can restore the last known state
-while the bridge is disconnected.
+MQTT state messages are retained so Home Assistant can restore the last known
+state while the bridge is disconnected. Retained command messages are ignored
+to prevent a stale command from running when the bridge reconnects.
 
 Windows/Bleak can take longer than usual to finish a BLE connection when the
 signal is weak. The bridge allows 60 seconds and retries once after the device
@@ -223,11 +242,13 @@ BLE writes and status reads. The controller can report multiple active zones;
 the bridge publishes an `active_zones` JSON list, with an individual
 remaining-time sensor for each zone.
 
-After an on-demand command connects to the controller, the BLE link remains
-open for 120 seconds by default in case another command follows. The timer
-resets with each command and can be changed with `--idle-grace <seconds>` or
-the `idle_grace` setting in `galcon_mqtt.json`. Set it to `0` to disconnect
-immediately after each command.
+After a successful set command, the BLE link remains open for 120 seconds by
+default in case another command follows. The timer resets with each successful
+set and can be changed with `--idle-grace <seconds>` or the `idle_grace`
+setting in `galcon_mqtt.json`. Set it to `0` to disconnect immediately after
+each command. During the grace period, the bridge performs a lightweight
+status read every 15 seconds so the controller does not close the otherwise-
+idle BLE link early.
 
 For unattended operation, create a Windows Task Scheduler task that runs
 `galcon-mqtt.exe --mqtt-host <broker>` at user logon or system startup. Set
