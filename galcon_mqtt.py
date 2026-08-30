@@ -319,7 +319,7 @@ class GalconMqttBridge:
                     self.device, timeout=self.args.ble_connect_timeout,
                     disconnected_callback=self._on_ble_disconnected,
                     services=[SERVICE_UUID],
-                    winrt=dict(use_cached_services=True))
+                    winrt=dict(use_cached_services=False))
                 await self.client.connect()
             except Exception:  # noqa: BLE001
                 await self._disconnect_ble()
@@ -338,7 +338,7 @@ class GalconMqttBridge:
                     self.device, timeout=self.args.ble_connect_timeout,
                     disconnected_callback=self._on_ble_disconnected,
                     services=[SERVICE_UUID],
-                    winrt=dict(use_cached_services=True))
+                    winrt=dict(use_cached_services=False))
                 try:
                     await self.client.connect()
                     break
