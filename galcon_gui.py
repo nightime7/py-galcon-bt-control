@@ -468,6 +468,14 @@ class MqttBridgeSession:
 
     @staticmethod
     def _record_from_details(details):
+        raw_record = details.get("record")
+        if raw_record is not None:
+            try:
+                record = bytes.fromhex(str(raw_record))
+            except ValueError:
+                record = b""
+            if len(record) == 20:
+                return record
         record = bytearray(20)
         duration = int(details.get("duration_minutes", 0))
         record[1], record[2] = divmod(duration, 60)
@@ -497,7 +505,14 @@ class MqttBridgeSession:
     async def _publish(self, suffix, payload):
         if self.client is None or not self.connected:
             raise RuntimeError("Not connected to MQTT bridge")
-        self.client.publish(self.topic(suffix), payload, qos=1, retain=False)
+        topic = self.topic(suffix)
+        info = self.client.publish(topic, payload, qos=1, retain=False)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(f"MQTT publish failed with code {info.rc}")
+        await asyncio.to_thread(info.wait_for_publish, timeout=5)
+        if not info.is_published():
+            raise RuntimeError("MQTT broker did not acknowledge the command")
+        self.ui_queue.put(("log", f"[{ts()}] Sent MQTT command: {topic}"))
 
     async def read_status(self):
         await self._publish("refresh", "gui")
@@ -1227,8 +1242,12 @@ class GalconGui(tk.Tk):
                 self.program_records = payload
                 self._render_programs()
             elif kind == "programs_patch":
+                selected_zone = int(self.edit_zone_var.get())
+                should_render = (selected_zone in payload and
+                                 selected_zone not in self.program_records)
                 self.program_records.update(payload)
-                self._render_programs()
+                if should_render:
+                    self._render_programs()
             elif kind == "update_result":
                 self._handle_update_result(payload)
             elif kind == "update_error":

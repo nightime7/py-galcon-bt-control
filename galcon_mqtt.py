@@ -578,8 +578,9 @@ class GalconMqttBridge:
             async with self.command_lock:
                 if not await write_schedule(self.client, zone, updated):
                     raise RuntimeError(REPAIR_HINT)
-                self.programs[zone] = updated
-                self._publish_program(zone, updated)
+                confirmed = await self._confirm_program_save(zone, updated)
+                self.programs[zone] = confirmed
+                self._publish_program(zone, confirmed)
             return
         record = self.programs.get(zone)
         if record is None:
@@ -600,13 +601,24 @@ class GalconMqttBridge:
         async with self.command_lock:
             if not await write_schedule(self.client, zone, updated):
                 raise RuntimeError(REPAIR_HINT)
-            self.programs[zone] = updated
-            self._publish_program(zone, updated)
+            confirmed = await self._confirm_program_save(zone, updated)
+            self.programs[zone] = confirmed
+            self._publish_program(zone, confirmed)
+
+    async def _confirm_program_save(self, zone, requested):
+        for _attempt in range(10):
+            await asyncio.sleep(0.6)
+            confirmed = await read_schedule(self.client, zone, display=False)
+            if confirmed and confirmed[:15] == requested[:15]:
+                return confirmed
+        raise RuntimeError(
+            f"Zone {zone} schedule was not accepted by the controller")
 
     def _publish_program(self, zone, record):
         days = record[4]
         payload = {
             "zone": zone,
+            "record": record.hex(),
             "duration_minutes": record[1] * 60 + record[2],
             "mode": "cyclic" if days & 0x80 else "weekly",
             "days_mask": days & 0x7f,
