@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from bleak import BleakClient, BleakScanner
+import paho.mqtt.client as mqtt
 
 from control_galcon import (
     APP_VERSION,
@@ -42,6 +43,7 @@ from control_galcon import (
     write_char,
     write_schedule,
 )
+from galcon_mqtt import DEFAULT_PREFIX, load_mqtt_config
 
 DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 WINDOW_POSITIONS = (5, 7, 9, 11)
@@ -361,6 +363,172 @@ class GalconSession:
             self.ui_queue.put(("busy", False))
 
 
+class MqttBridgeSession:
+    """Present the MQTT bridge through the same operations as direct BLE."""
+    def __init__(self, ui_queue, host, port, prefix, username=None,
+                 password=None, tls=False):
+        self.ui_queue = ui_queue
+        self.host = host
+        self.port = port
+        self.prefix = prefix.rstrip("/")
+        self.username = username or None
+        self.password = password or None
+        self.tls = tls
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        self.client = None
+        self.connected = False
+        self._connected_event = asyncio.Event()
+        self._zone_state = {}
+        self._zone_remaining = {}
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def submit(self, coro):
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        future.add_done_callback(self._done)
+        return future
+
+    def _done(self, future):
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.ui_queue.put(("log", f"{type(exc).__name__}: {exc}"))
+            self.ui_queue.put(("busy", False))
+
+    def topic(self, suffix):
+        return f"{self.prefix}/{suffix}"
+
+    async def connect(self, **_unused):
+        self.ui_queue.put(("busy", True))
+        if not self.host:
+            raise RuntimeError("MQTT host is required for bridge mode")
+        self._connected_event.clear()
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                  client_id=f"galcon-gui-{int(time.time())}")
+        if self.username:
+            self.client.username_pw_set(self.username, self.password)
+        if self.tls:
+            self.client.tls_set()
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+        self.client.connect_async(self.host, self.port, keepalive=60)
+        self.client.loop_start()
+        try:
+            await asyncio.wait_for(self._connected_event.wait(), timeout=15)
+        except asyncio.TimeoutError as exc:
+            await self.disconnect()
+            raise RuntimeError("MQTT broker did not respond within 15 seconds") from exc
+        self.connected = True
+        self.ui_queue.put(("connected", True))
+        self.ui_queue.put(("log", f"[{ts()}] Connected to MQTT bridge at {self.host}:{self.port}"))
+        await self.refresh_all()
+        self.ui_queue.put(("busy", False))
+
+    def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None):
+        if reason_code != 0:
+            self.loop.call_soon_threadsafe(
+                self.ui_queue.put, ("log", f"MQTT connection failed: {reason_code}"))
+            return
+        client.subscribe(self.topic("#"), qos=1)
+        self.loop.call_soon_threadsafe(self._connected_event.set)
+
+    def _on_message(self, _client, _userdata, message):
+        suffix = message.topic.removeprefix(f"{self.prefix}/")
+        text = message.payload.decode("utf-8", errors="replace")
+        if suffix == "availability":
+            self.ui_queue.put(("bridge_availability", text))
+        elif suffix.startswith("zone/") and suffix.endswith("/state"):
+            self._zone_state[int(suffix.split("/")[1])] = text == "ON"
+            self._publish_zone_status()
+        elif suffix.startswith("zone/") and suffix.endswith("/remaining"):
+            try:
+                self._zone_remaining[int(suffix.split("/")[1])] = int(text)
+            except ValueError:
+                return
+            self._publish_zone_status()
+        elif suffix.startswith("zone/") and suffix.endswith("/program/details"):
+            try:
+                zone = int(suffix.split("/")[1])
+                self.ui_queue.put(("programs_patch", {
+                    zone: self._record_from_details(json.loads(text))}))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+        elif suffix == "error":
+            self.ui_queue.put(("log", f"[{ts()}] Bridge error: {text}"))
+
+    def _publish_zone_status(self):
+        active = {zone: self._zone_remaining.get(zone, 0)
+                  for zone, is_active in self._zone_state.items()
+                  if is_active and self._zone_remaining.get(zone, 0) > 0}
+        self.ui_queue.put(("mqtt_status", active))
+
+    @staticmethod
+    def _record_from_details(details):
+        record = bytearray(20)
+        duration = int(details.get("duration_minutes", 0))
+        record[1], record[2] = divmod(duration, 60)
+        if details.get("mode") == "cyclic":
+            record[4] = 0x80
+            record[5] = int(details.get("start_hour", 0))
+            record[6] = int(details.get("start_minute", 0))
+            record[13] = 0x80 + int(details.get("start_in_days", 0))
+            record[14] = 0xc0 + int(details.get("cadence_days", 1))
+        else:
+            record[4] = int(details.get("days_mask", 0))
+            record[11], record[13] = 0xff, 0x80
+        for index, window in enumerate(details.get("windows", [])):
+            pos = WINDOW_POSITIONS[index]
+            record[pos] = int(window["hour"]) if window.get("enabled") else 0xff
+            record[pos + 1] = int(window["minute"] or 0) if window.get("enabled") else 0
+        return bytes(record)
+
+    async def disconnect(self):
+        if self.client is not None:
+            self.client.loop_stop()
+            self.client.disconnect()
+        self.client = None
+        self.connected = False
+        self.ui_queue.put(("connected", False))
+
+    async def _publish(self, suffix, payload):
+        if self.client is None or not self.connected:
+            raise RuntimeError("Not connected to MQTT bridge")
+        self.client.publish(self.topic(suffix), payload, qos=1, retain=False)
+
+    async def read_status(self):
+        await self._publish("refresh", "gui")
+
+    async def read_programs(self):
+        await self._publish("refresh", "gui")
+
+    async def refresh_all(self):
+        await self._publish("refresh", "gui")
+
+    async def open_zone(self, zone, minutes):
+        await self._publish(f"zone/{zone}/set", f"OPEN:{minutes}")
+
+    async def close_zone(self, zone):
+        await self._publish(f"zone/{zone}/set", "CLOSE")
+
+    async def set_seasonal(self, percent):
+        await self._publish("device/seasonal/set", str(percent))
+
+    async def set_rainoff(self, days):
+        await self._publish("device/rainoff/set", str(days))
+
+    async def save_program(self, zone, record):
+        payload = {"record": bytes(record).hex()}
+        await self._publish(f"zone/{zone}/program/set", json.dumps(payload))
+
+    async def save_programs(self, records):
+        for zone in sorted(records):
+            await self.save_program(zone, records[zone])
+
+
 class GalconGui(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -369,9 +537,14 @@ class GalconGui(tk.Tk):
         self.geometry("1240x760")
         self.minsize(1080, 660)
         self.ui_queue = queue.Queue()
+        self.mqtt_config = load_mqtt_config()
+        self.connection_mode = tk.StringVar(
+            value="mqtt" if self.mqtt_config.get("mqtt_host") else "ble")
         self.session = GalconSession(self.ui_queue)
         self.program_records = {}
         self.active_zone = None
+        self.active_zones = set()
+        self.remaining_by_zone = {}
         self.remaining_seconds = 0
         self.status_seen_at = 0.0
         self.connected = False
@@ -390,6 +563,7 @@ class GalconGui(tk.Tk):
         self._build_style()
         self._build_menu()
         self._build_ui()
+        self._on_connection_mode_changed()
         self._sync_day_labels()
         self._sync_mode_controls()
         self._set_connected(False)
@@ -492,10 +666,37 @@ class GalconGui(tk.Tk):
 
         top2 = ttk.Frame(self, padding=(14, 0, 14, 8))
         top2.grid(row=1, column=0, sticky="ew")
-        ttk.Label(top2, text="MAC (optional)").grid(row=0, column=0, sticky="e")
+        ttk.Label(top2, text="Connection").grid(row=0, column=0, sticky="e")
+        ttk.Radiobutton(top2, text="Bluetooth", value="ble",
+                        variable=self.connection_mode,
+                        command=self._on_connection_mode_changed).grid(
+                            row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Radiobutton(top2, text="MQTT bridge", value="mqtt",
+                        variable=self.connection_mode,
+                        command=self._on_connection_mode_changed).grid(
+                            row=0, column=2, sticky="w", padx=6)
+        ttk.Label(top2, text="Host").grid(row=0, column=3, sticky="e")
+        self.mqtt_host_var = tk.StringVar(
+            value=self.mqtt_config.get("mqtt_host", ""))
+        self.mqtt_host_entry = ttk.Entry(top2, width=20,
+                                         textvariable=self.mqtt_host_var)
+        self.mqtt_host_entry.grid(row=0, column=4, padx=6)
+        ttk.Label(top2, text="Port").grid(row=0, column=5, sticky="e")
+        self.mqtt_port_var = tk.IntVar(
+            value=int(self.mqtt_config.get("mqtt_port", 1883)))
+        self.mqtt_port_entry = ttk.Spinbox(top2, from_=1, to=65535, width=7,
+                                           textvariable=self.mqtt_port_var)
+        self.mqtt_port_entry.grid(row=0, column=6, padx=6)
+        ttk.Label(top2, text="Prefix").grid(row=0, column=7, sticky="e")
+        self.mqtt_prefix_var = tk.StringVar(
+            value=self.mqtt_config.get("prefix", DEFAULT_PREFIX))
+        self.mqtt_prefix_entry = ttk.Entry(top2, width=18,
+                                           textvariable=self.mqtt_prefix_var)
+        self.mqtt_prefix_entry.grid(row=0, column=8, padx=6)
+        ttk.Label(top2, text="MAC (optional)").grid(row=1, column=0, sticky="e")
         self.mac_var = tk.StringVar(value=load_saved_mac() or "")
-        ttk.Entry(top2, width=20, textvariable=self.mac_var).grid(row=0, column=1, padx=6)
-        ttk.Button(top2, text="Save MAC", command=self._save_mac).grid(row=0, column=2, padx=(0, 6))
+        ttk.Entry(top2, width=20, textvariable=self.mac_var).grid(row=1, column=1, padx=6)
+        ttk.Button(top2, text="Save MAC", command=self._save_mac).grid(row=1, column=2, padx=(0, 6))
 
         status_bar = ttk.Frame(self, padding=(14, 0, 14, 8))
         status_bar.grid(row=2, column=0, sticky="ew")
@@ -685,13 +886,19 @@ class GalconGui(tk.Tk):
 
     def _set_connected(self, connected):
         self.connected = connected
-        self.connection_label.configure(text="Connected" if connected else "Disconnected")
+        if connected:
+            label = "MQTT bridge connected" if self.connection_mode.get() == "mqtt" else "Bluetooth connected"
+        else:
+            label = "Disconnected"
+        self.connection_label.configure(text=label)
         self.connect_button.configure(state="disabled" if connected else "normal")
         self.disconnect_button.configure(state="normal" if connected else "disabled")
         self._set_widget_state(self.connected_controls,
                                "normal" if connected else "disabled")
         if not connected:
             self.active_zone = None
+            self.active_zones.clear()
+            self.remaining_by_zone = {}
             self.remaining_seconds = 0
             self._render_zone_status()
 
@@ -701,6 +908,19 @@ class GalconGui(tk.Tk):
         self.busy_label.configure(text="Working..." if self.busy_count else "")
 
     def _connect(self):
+        if self.connection_mode.get() == "mqtt":
+            host = self.mqtt_host_var.get().strip()
+            prefix = self.mqtt_prefix_var.get().strip()
+            if not host or not prefix:
+                messagebox.showerror("MQTT bridge", "MQTT host and topic prefix are required.")
+                return
+            self.session = MqttBridgeSession(
+                self.ui_queue, host, int(self.mqtt_port_var.get()), prefix,
+                self.mqtt_config.get("mqtt_username"),
+                self.mqtt_config.get("mqtt_password"),
+                bool(self.mqtt_config.get("mqtt_tls")))
+            self.session.submit(self.session.connect())
+            return
         pin = self.pin_var.get().strip()
         if pin and (not pin.isdigit() or len(pin) != 4):
             messagebox.showerror("Invalid PIN", "PIN must be exactly 4 digits.")
@@ -713,6 +933,13 @@ class GalconGui(tk.Tk):
             debug=self.debug_var.get(),
             mac=mac or None,
         ))
+
+    def _on_connection_mode_changed(self):
+        mqtt_mode = self.connection_mode.get() == "mqtt"
+        state = "normal" if mqtt_mode and not self.connected else "disabled"
+        for widget in (self.mqtt_host_entry, self.mqtt_port_entry,
+                       self.mqtt_prefix_entry):
+            widget.configure(state=state)
 
     def _disconnect(self):
         self.session.submit(self.session.disconnect())
@@ -992,6 +1219,10 @@ class GalconGui(tk.Tk):
                 self._set_busy(payload)
             elif kind == "status":
                 self._apply_status(payload)
+            elif kind == "mqtt_status":
+                self._apply_mqtt_status(payload)
+            elif kind == "bridge_availability":
+                self._log(f"[{ts()}] MQTT bridge is {payload}")
             elif kind == "programs":
                 self.program_records = payload
                 self._render_programs()
@@ -1017,10 +1248,22 @@ class GalconGui(tk.Tk):
             return
         if value[0] == 0xff:
             self.active_zone = None
+            self.active_zones.clear()
+            self.remaining_by_zone = {}
             self.remaining_seconds = 0
         else:
             self.active_zone = (value[0] & 0x0f) + 1
+            self.active_zones = {self.active_zone}
             self.remaining_seconds = max(0, value[2] * 60 + value[3])
+            self.remaining_by_zone = {self.active_zone: self.remaining_seconds}
+        self.status_seen_at = time.monotonic()
+        self._render_zone_status()
+
+    def _apply_mqtt_status(self, active):
+        self.active_zones = set(active)
+        self.remaining_by_zone = dict(active)
+        self.active_zone = next(iter(self.active_zones), None)
+        self.remaining_seconds = self.remaining_by_zone.get(self.active_zone, 0)
         self.status_seen_at = time.monotonic()
         self._render_zone_status()
 
@@ -1035,9 +1278,15 @@ class GalconGui(tk.Tk):
         return max(0, int(round(self.remaining_seconds - elapsed)))
 
     def _render_zone_status(self):
-        remaining = self._current_remaining()
         for zone, widgets in self.zone_widgets.items():
-            active = zone == self.active_zone and remaining > 0
+            if self.connection_mode.get() == "mqtt":
+                elapsed = time.monotonic() - self.status_seen_at
+                remaining = max(0, int(round(
+                    self.remaining_by_zone.get(zone, 0) - elapsed)))
+                active = zone in self.active_zones and remaining > 0
+            else:
+                remaining = self._current_remaining()
+                active = zone == self.active_zone and remaining > 0
             color = ZONE_ACTIVE_COLOR if active else ZONE_IDLE_COLOR
             widgets["canvas"].itemconfigure(widgets["indicator"], fill=color)
             widgets["state"].configure(text="Running" if active else "Idle")

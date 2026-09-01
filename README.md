@@ -15,7 +15,9 @@ the module docstring in `control_galcon.py` for full protocol notes.
   rain-off, and a persistent `--interactive` session mode.
 - `galcon_gui.py` - a desktop GUI (Tkinter) with live zone status,
   countdown timers, and a program editor (weekly/cyclic, per-window
-  enable/disable, hour/minute dropdowns).
+    enable/disable, hour/minute dropdowns). It can connect directly over BLE
+    or send commands through the configured MQTT bridge, so both can run at
+    the same time.
 - `galcon_mqtt.py` - a headless MQTT bridge with Home Assistant MQTT
     Discovery, battery-friendly BLE connection/reconnect, status polling, zone
     controls, and program/device setting topics.

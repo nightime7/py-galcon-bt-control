@@ -567,6 +567,20 @@ class GalconMqttBridge:
             raise ValueError(f"program command must be JSON: {exc}") from exc
         if not isinstance(changes, dict):
             raise ValueError("program command must be a JSON object")
+        raw_record = changes.get("record")
+        if raw_record is not None:
+            try:
+                updated = bytes.fromhex(str(raw_record))
+            except ValueError as exc:
+                raise ValueError("program record must be hexadecimal") from exc
+            if len(updated) != 20:
+                raise ValueError("program record must contain exactly 20 bytes")
+            async with self.command_lock:
+                if not await write_schedule(self.client, zone, updated):
+                    raise RuntimeError(REPAIR_HINT)
+                self.programs[zone] = updated
+                self._publish_program(zone, updated)
+            return
         record = self.programs.get(zone)
         if record is None:
             record = await read_schedule(self.client, zone, display=False)
