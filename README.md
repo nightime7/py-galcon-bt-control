@@ -208,10 +208,11 @@ The release workflow builds both architectures when a `v*` tag is pushed.
 
 ## Development Notes
 
-Full protocol notes are in the `control_galcon.py` module docstring. Scripts
-under `research/` were used for protocol investigation and are not required
-for normal operation. Some send undocumented frames; read their docstrings
-before running them.
+See [BLUETOOTH_PROTOCOL.md](BLUETOOTH_PROTOCOL.md) for GATT characteristics,
+byte and bit layouts, operation sequences, captured frames, and known unknowns.
+Scripts under `research/` were used for protocol investigation and are not
+required for normal operation. Some send undocumented frames; read their
+docstrings before running them.
 
 The `20900101` characteristic is also the schedule-save pipe. Arbitrary short
 writes can overwrite a saved program. The shipped applications avoid unsafe
