@@ -93,6 +93,54 @@ def load_mqtt_config(path=MQTT_CONFIG_PATH):
     return {}
 
 
+def apply_program_changes(record, changes):
+    allowed = {
+        "duration": "duration_minutes",
+        "days": "days_mask",
+        "cadence": "cadence_days",
+        "start_in": "start_in_days",
+    }
+    kwargs = {allowed[key]: value for key, value in changes.items()
+              if key in allowed}
+    window = changes.get("window")
+    if window is None:
+        kwargs.update({key: changes[key] for key in ("hour", "minute")
+                       if key in changes})
+        return modify_schedule(record, **kwargs)
+
+    try:
+        window = int(window)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("window must be 1-4") from exc
+    if not 1 <= window <= 4:
+        raise ValueError("window must be 1-4")
+
+    updated = bytearray(modify_schedule(record, **kwargs))
+    position = 5 + (window - 1) * 2
+    enabled = changes.get("enabled")
+    if enabled is not None:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be true or false")
+        if enabled:
+            if updated[position] == 0xff:
+                updated[position] = 0
+                updated[position + 1] = 0
+        else:
+            updated[position] = 0xff
+            updated[position + 1] = 0
+    if "hour" in changes:
+        hour = int(changes["hour"])
+        if not 0 <= hour <= 23:
+            raise ValueError("window hour must be 0-23")
+        updated[position] = hour
+    if "minute" in changes:
+        minute = int(changes["minute"])
+        if not 0 <= minute <= 59:
+            raise ValueError("window minute must be 0-59")
+        updated[position + 1] = minute
+    return bytes(updated)
+
+
 class GalconMqttBridge:
     def __init__(self, args):
         self.args = args
@@ -616,17 +664,7 @@ class GalconMqttBridge:
             record = await read_schedule(self.client, zone, display=False)
         if record is None:
             raise RuntimeError(f"could not read zone {zone} program")
-        allowed = {
-            "duration": "duration_minutes",
-            "hour": "hour",
-            "minute": "minute",
-            "days": "days_mask",
-            "cadence": "cadence_days",
-            "start_in": "start_in_days",
-        }
-        kwargs = {allowed[key]: value for key, value in changes.items()
-                  if key in allowed}
-        updated = modify_schedule(record, **kwargs)
+        updated = apply_program_changes(record, changes)
         async with self.command_lock:
             if not await write_schedule(self.client, zone, updated):
                 raise RuntimeError(REPAIR_HINT)
@@ -733,15 +771,52 @@ class GalconMqttBridge:
                             None, {"icon": "mdi:calendar-clock",
                                    "json_attributes_topic": self.topic(
                                        f"zone/{zone}/program/details")}, zd)
-            self._discovery("sensor", f"zone_{zone}_program_duration",
-                            f"Zone {zone} program duration",
-                            f"zone/{zone}/program/duration", None,
-                            {"unit_of_measurement": "min"}, zd)
+            self._discovery(
+                "number", f"zone_{zone}_program_duration",
+                f"Zone {zone} program duration",
+                f"zone/{zone}/program/duration",
+                f"zone/{zone}/program/set",
+                {"min": 0, "max": 600, "step": 1, "mode": "box",
+                 "unit_of_measurement": "min",
+                 "command_template":
+                     '{"duration": {{ value | int }}}'}, zd)
+            self.mqtt.publish(
+                f"homeassistant/sensor/{self.prefix}/"
+                f"zone_{zone}_program_duration/config",
+                "", qos=1, retain=True)
             self._discovery("sensor", f"zone_{zone}_program_next_run",
                             f"Zone {zone} next run",
                             f"zone/{zone}/program/next_run", None,
                             {"device_class": "timestamp",
                              "icon": "mdi:calendar-clock"}, zd)
+            for index in range(4):
+                window = index + 1
+                details = f"zone/{zone}/program/details"
+                command = f"zone/{zone}/program/set"
+                self._discovery(
+                    "switch", f"zone_{zone}_window_{window}_enabled",
+                    f"Window {window}", details, command,
+                    {"icon": "mdi:calendar-clock",
+                     "value_template":
+                         "{{ 'ON' if value_json.windows["
+                         f"{index}].enabled else 'OFF' }}}}",
+                     "command_template":
+                         '{"window": ' + str(window) +
+                         ', "enabled": {{ (value == \'ON\') | lower }}}'},
+                    zd, payload_on="ON", payload_off="OFF")
+                for field, maximum in (("hour", 23), ("minute", 59)):
+                    self._discovery(
+                        "number", f"zone_{zone}_window_{window}_{field}",
+                        f"Window {window} {field}", details, command,
+                        {"min": 0, "max": maximum, "step": 1,
+                         "mode": "box",
+                         "value_template":
+                             "{{ value_json.windows[" + str(index) +
+                             "]." + field + " if value_json.windows[" +
+                             str(index) + "].enabled else 0 }}",
+                         "command_template":
+                             '{"window": ' + str(window) + ', "' + field +
+                             '": {{ value | int }}}'}, zd)
         self._discovery("number", "seasonal", "Seasonal adjustment",
                         "device/seasonal", "device/seasonal/set",
                         {"min": 0, "max": 250, "step": 1, "unit_of_measurement": "%"}, device)

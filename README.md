@@ -198,8 +198,9 @@ After it connects to the broker, Home Assistant will discover:
 
 - Controller connection, status, active-zones, and last-update sensors
 - Four zone switches and remaining-time sensors
-- Four zone program-mode sensors with JSON schedule attributes, duration
-    sensors, and calculated next-run timestamp sensors
+- Four zone program-mode sensors with JSON schedule attributes, editable
+    duration controls, and calculated next-run timestamp sensors
+- Enable, hour, and minute controls for all four program windows in each zone
 - Seasonal-adjustment and rain-off number controls
 
 The bridge also publishes retained `galcon_gl6100/availability` (`online` or
@@ -215,10 +216,13 @@ galcon_gl6100/refresh                 any payload; repolls status/programs
 galcon_gl6100/device/seasonal/set     100
 galcon_gl6100/device/rainoff/set      0
 galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
+galcon_gl6100/zone/1/program/set      {"window": 2, "enabled": true, "hour": 14, "minute": 30}
 ```
 
 Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
-`cadence`, and `start_in`. By default the bridge does not connect to the
+`cadence`, and `start_in`. Add `window` (1-4) to target a specific program
+window; `enabled` controls whether that window is used. Without `window`,
+`hour` and `minute` continue to target window 1. By default the bridge does not connect to the
 controller or perform background polling. It connects only when Home
 Assistant sends a command or refresh request. Passive status/program reads,
 including the initial collection at startup, disconnect immediately when the
