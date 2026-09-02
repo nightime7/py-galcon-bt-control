@@ -1,134 +1,92 @@
 # Galcon GL6100 BLE Control
 
-Unofficial, reverse-engineered Python tools to control a Galcon GL6100 /
-6100BT DC4 Bluetooth LE irrigation valve controller from Windows, without
-needing the official mobile app for day-to-day operation.
+Unofficial Windows tools for controlling a Galcon GL6100 / 6100BT DC4
+Bluetooth LE irrigation controller without using the official app for
+day-to-day operation.
 
-This project is not affiliated with or endorsed by Galcon. The BLE protocol
-was reverse-engineered from HCI captures of the official Android app. See
-the module docstring in `control_galcon.py` for full protocol notes.
+The BLE protocol was reverse-engineered from Android HCI captures. This
+project is not affiliated with or endorsed by Galcon.
 
-## Features
+## What Is Included
 
-- `control_galcon.py` - command-line control: open/close zones, read status,
-  read/write weekly or cyclic irrigation programs, seasonal adjustment,
-  rain-off, and a persistent `--interactive` session mode.
-- `galcon_gui.py` - a desktop GUI (Tkinter) with live zone status,
-  countdown timers, and a program editor (weekly/cyclic, per-window
-    enable/disable, hour/minute dropdowns). It can connect directly over BLE
-    or send commands through the configured MQTT bridge, so both can run at
-    the same time.
-- `galcon_mqtt.py` - a headless MQTT bridge with Home Assistant MQTT
-    Discovery, battery-friendly BLE connection/reconnect, status polling, zone
-    controls, and program/device setting topics.
-- `galcon_mqtt_tray.py` - a Windows notification-area host for the bridge,
-    with live MQTT/controller status and a Quit command.
+- `GalconControlGUI.exe` / `galcon_gui.py`: desktop control, live status,
+  countdowns, and weekly or cyclic program editing.
+- `galcon-cli.exe` / `control_galcon.py`: command-line control and diagnostics.
+- `GalconMqttTray.exe` / `galcon_mqtt_tray.py`: notification-area MQTT bridge
+  with configuration, logs, and automatic startup controls.
+- `galcon-mqtt.exe` / `galcon_mqtt.py`: headless MQTT bridge with Home
+  Assistant MQTT Discovery.
 
 ## Install
 
-### Option 1: MSI installer (recommended)
+### Windows Installer
 
-Download the MSI for your architecture from the
-[Releases](https://github.com/nightime7/py-galcon-bt-control/releases) page
-and run it. Python does **not** need to be installed - the MSI bundles its
-own interpreter and all dependencies.
+Download the MSI for your architecture from
+[Releases](https://github.com/nightime7/py-galcon-bt-control/releases):
 
-The installer adds Start Menu and Desktop shortcuts for the GUI, and also
-installs `galcon-cli.exe`, `galcon-mqtt.exe`, and `GalconMqttTray.exe`
-alongside it for command-line and Home Assistant use.
+- `x64`: most Intel and AMD Windows PCs
+- `arm64`: ARM-based Windows devices such as Snapdragon laptops
 
-The Start Menu also includes a **Galcon MQTT Bridge** shortcut. Right-clicking
-the running tray icon includes a **Start with Windows** option that controls
-startup for the current user. Turning it off also removes legacy Startup-folder
-shortcuts created by earlier installer versions.
+The MSI includes Python and all dependencies. It installs the GUI, CLI, MQTT
+bridge, tray application, and Start Menu shortcuts. Installing a newer version
+upgrades the existing installation and preserves configuration in AppData.
 
-The installer's final page has separate checkboxes for launching the control
-GUI and running the MQTT bridge. Both options are unchecked by default; the
-MQTT bridge requires broker configuration before it can connect.
-
-Installing a newer MSI over an existing installation performs an in-place
-upgrade: Windows Installer removes the older product first, then installs the
-new version while preserving configuration stored under the user's AppData.
-
-Right-click the Galcon tray icon to see MQTT/controller connection status,
-currently active zones, open the **Configure MQTT...** form, toggle **Start
-with Windows**, or quit the bridge. The configuration form edits every bridge
-setting and saves the same `galcon_mqtt.json` file used by the command-line
-bridge. Restart the tray app after saving to apply connection settings.
-Double-click the tray icon, or choose **Show Log...**, to open a live window
-containing the same timestamped bridge activity shown by the CLI.
-
-The installer uses the standard Windows MSI flow, including a GPL-3.0 license
-agreement page, an install-folder chooser, an all-users installation option,
-and a Launch on Finish checkbox.
-
-Pick `x64` for a normal Intel/AMD PC, or `arm64` for an ARM-based Windows
-device (e.g. Snapdragon-powered laptops).
-
-#### "Unknown publisher" warning
-
-The MSI is **not code-signed**, so Windows will show an *Unknown publisher*
-prompt (and possibly a SmartScreen "Windows protected your PC" screen). This
-is expected. Code-signing certificates are issued by commercial CAs and are
-not free, and a self-signed certificate would not help - it only suppresses
-the warning on machines that have explicitly been told to trust it.
-
-To proceed: click **More info** then **Run anyway**.
-
-If you would rather not trust an unsigned installer, use
-[Option 2](#option-2-run-from-source) and run from source instead - the code
-is all here and readable.
-
-To verify a download actually came from this repository, compare its hash
-against the checksums published in the release notes:
+The installer is not code-signed, so Windows may display an **Unknown
+publisher** or SmartScreen warning. Verify the SHA-256 checksum against the
+release notes before continuing:
 
 ```powershell
-Get-FileHash .\GalconGL6100Control-1.1.0-x64.msi -Algorithm SHA256
+Get-FileHash .\GalconGL6100Control-<version>-x64.msi -Algorithm SHA256
 ```
 
-### Option 2: Run from source
+### Run From Source
+
+Requirements:
 
 - Windows with Bluetooth LE support
-- Python 3.10+
-- `pip install -r requirements.txt`
+- Python 3.10 or newer
 
-## First-time setup
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
-The controller's PIN (and, optionally, its MAC address) are device-specific
-and are **not** committed to this repository. They are stored locally in
-`galcon_device.json`, which is gitignored.
+## Controller Setup
 
-Create it by running:
+First pair and configure the controller with the official Galcon app. This
+project does not automate initial BLE enrollment.
+
+Save the controller's four-digit PIN locally:
 
 ```powershell
 python control_galcon.py --set-pin 1234
 ```
 
-If you installed via the MSI, use the bundled CLI instead (run it from the
-install folder, e.g. `C:\Program Files\Galcon GL6100 Control`):
+For an installed copy, run this from the installation directory, normally
+`C:\Program Files\Galcon GL6100 Control`:
 
 ```powershell
 .\galcon-cli.exe --set-pin 1234
 ```
 
-This is the PIN shown on the controller's display the first time it was
-paired with the official app. `--set-pin` only needs to be run once.
-
-A MAC address is optional - scanning works by the controller's advertised
-name (`GL6100...`) alone. If you want to pin/disambiguate a specific unit:
+The PIN and optional MAC address are stored in the gitignored
+`galcon_device.json`. Scanning normally identifies the controller by its
+advertised `GL6100...` name. To select a specific controller, save its MAC:
 
 ```powershell
 python control_galcon.py --set-mac AA:BB:CC:DD:EE:FF
 ```
 
-Alternatively, copy `galcon_device.example.json` to `galcon_device.json` and
-fill in your own values by hand.
+## Use The Controller
 
-**Important:** this project does not perform BLE pairing/enrollment
-automation. Pair the controller with the official Galcon app first (enter
-the PIN it displays), then use these tools for day-to-day control.
+Start the installed **Galcon GL6100 Control** shortcut, or run from source:
 
-## Usage
+```powershell
+python galcon_gui.py
+```
+
+Common CLI commands:
 
 ```powershell
 python control_galcon.py --status
@@ -138,166 +96,131 @@ python control_galcon.py --close 1
 python control_galcon.py --interactive
 ```
 
-Run `python control_galcon.py --help` for the full command list.
+Run `python control_galcon.py --help` for all commands.
 
-For the GUI:
+## Home Assistant And MQTT
 
-```powershell
-python galcon_gui.py
-```
+The bridge must run on a Windows PC with Bluetooth access to the controller
+and network access to the MQTT broker.
 
-## Home Assistant / MQTT
+### Installed Bridge
 
-Run the bridge on a Windows PC that has Bluetooth access to the controller and
-network access to your MQTT broker:
+Start **Galcon MQTT Bridge** from the Start Menu. Right-click its tray icon to:
 
-```powershell
-python galcon_mqtt.py --mqtt-host homeassistant.local
-```
+- Configure MQTT and controller connection settings
+- View bridge activity and connection status
+- Enable **Start with Windows**
+- Quit the bridge
 
-To avoid entering broker options each time, copy
-`galcon_mqtt.example.json` to `galcon_mqtt.json` and fill in the local broker
-settings. `galcon_mqtt.json` is gitignored and must never be committed. The
-installed MSI looks first in `%APPDATA%\Galcon GL6100 Control`; source runs
-also accept the file beside the Python script:
+Restart the tray application after changing connection settings.
+
+### Bridge From Source
+
+Copy the example configuration and edit the broker settings:
 
 ```powershell
 Copy-Item .\galcon_mqtt.example.json .\galcon_mqtt.json
 python galcon_mqtt.py
 ```
 
-For an installed copy, place the completed file at:
-
-```text
-%APPDATA%\Galcon GL6100 Control\galcon_mqtt.json
-```
-
-Command-line options override values from `galcon_mqtt.json`. The template
-defaults to command-only mode (`poll_interval: 0`), so the bridge connects to
-the controller only when Home Assistant sends a command or refresh request.
-
-An optional local HTTP API can be enabled for REST-based Home Assistant
-entities or diagnostics:
+You can also provide settings on the command line:
 
 ```powershell
-python galcon_mqtt.py --mqtt-host homeassistant.local --http-host 0.0.0.0 --http-port 8765
+python galcon_mqtt.py --mqtt-host homeassistant.local
 ```
 
-It provides `GET /api/status`, `GET /api/programs`, `POST /api/refresh`,
-`POST /api/zone/<zone>/set` with `{"command":"OPEN:5"}`, and device setting
-POST endpoints. Keep the HTTP API on a trusted network; it has no built-in
-authentication.
+Configuration is stored in `%APPDATA%\Galcon GL6100 Control` for installed
+applications. Source runs also accept `galcon_mqtt.json` beside the scripts.
+Command-line options override file settings. Do not commit configuration files
+containing broker credentials.
 
-With the MSI, run `galcon-mqtt.exe` from the installation folder. Add
-`--mqtt-username`, `--mqtt-password`, and `--mqtt-tls` when your broker
-requires authentication or TLS. The default MQTT prefix is
-`galcon_gl6100`; change it with `--prefix` if more than one bridge is used.
+### Home Assistant Entities
 
-The bridge publishes Home Assistant MQTT Discovery entities automatically.
-After it connects to the broker, Home Assistant will discover:
+MQTT Discovery creates:
 
-- Controller connection, status, active-zones, and last-update sensors
-- Four zone switches and remaining-time sensors
-- Four zone program-mode sensors with JSON schedule attributes, editable
-    duration controls, and calculated next-run timestamp sensors
-- Enable, hour, and minute controls for all four program windows in each zone
-- Seasonal-adjustment and rain-off number controls
+- Controller connection, status, active-zone, and last-update sensors
+- A manual on/off switch and remaining-time sensor for each zone
+- Program mode, next-run, and editable duration for each zone
+- Enable, hour, and minute controls for four program windows per zone
+- Seasonal-adjustment and rain-off controls
+- A status refresh button
 
-The bridge also publishes retained `galcon_gl6100/availability` (`online` or
-`offline`) separately from `galcon_gl6100/status` (`idle` or `running`), so
-Home Assistant can distinguish a connected idle controller from a disconnected
-one.
+The default topic prefix is `galcon_gl6100`. Change it with `--prefix` when
+running more than one bridge.
 
-Useful MQTT commands:
+### MQTT Commands
 
 ```text
 galcon_gl6100/zone/1/set              ON, OFF, OPEN:5, or CLOSE
-galcon_gl6100/refresh                 any payload; repolls status/programs
+galcon_gl6100/refresh                 any payload
 galcon_gl6100/device/seasonal/set     100
 galcon_gl6100/device/rainoff/set      0
 galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
 galcon_gl6100/zone/1/program/set      {"window": 2, "enabled": true, "hour": 14, "minute": 30}
 ```
 
-Program commands use JSON keys `duration`, `hour`, `minute`, `days`,
-`cadence`, and `start_in`. Add `window` (1-4) to target a specific program
-window; `enabled` controls whether that window is used. Without `window`,
-`hour` and `minute` continue to target window 1. By default the bridge does not connect to the
-controller or perform background polling. It connects only when Home
-Assistant sends a command or refresh request. Passive status/program reads,
-including the initial collection at startup, disconnect immediately when the
-read completes. Successful set commands use the configured `idle_grace`
-period (120 seconds by default), and each new set command restarts that timer.
-The live log reports when the timer is scheduled and when BLE disconnects. The
-initial collection populates Home Assistant entities immediately. Use
-`--no-initial-refresh` or `initial_refresh: false` to skip that one connection.
-To enable repeating polling, explicitly provide an interval, for
-example `--poll-interval 900` for one poll every 15 minutes. The bridge
-disconnects between polls unless `--keep-connected` is explicitly enabled.
-MQTT state messages are retained so Home Assistant can restore the last known
-state while the bridge is disconnected. Retained command messages are ignored
-to prevent a stale command from running when the bridge reconnects.
+Program JSON supports `duration`, `days`, `cadence`, and `start_in`. Use
+`window` from 1 through 4 with `enabled`, `hour`, or `minute` to edit a
+specific start window. Without `window`, `hour` and `minute` target window 1.
 
-Windows/Bleak can take longer than usual to finish a BLE connection when the
-signal is weak. The bridge allows 60 seconds and retries once after the device
-has been found; adjust this with `--ble-connect-timeout` or
-`ble_connect_timeout` in `galcon_mqtt.json`.
+### Connection Behavior
 
-Zone commands are serialized so rapid Home Assistant actions cannot interleave
-BLE writes and status reads. The controller can report multiple active zones;
-the bridge publishes an `active_zones` JSON list, with an individual
-remaining-time sensor for each zone.
+By default, the bridge connects over BLE when a command or refresh is needed.
+After a successful setting change it keeps the connection open for 120 seconds
+to make follow-up commands faster, then disconnects to conserve controller
+battery. Relevant settings are:
 
-After a successful set command, the BLE link remains open for 120 seconds by
-default in case another command follows. The timer resets with each successful
-set and can be changed with `--idle-grace <seconds>` or the `idle_grace`
-setting in `galcon_mqtt.json`. Set it to `0` to disconnect immediately after
-each command. During the grace period, the bridge performs a lightweight
-status read every 15 seconds so the controller does not close the otherwise-
-idle BLE link early.
+- `idle_grace`: seconds to retain the connection after a command; use `0` to
+  disconnect immediately.
+- `poll_interval`: background refresh interval in seconds; `0` disables it.
+- `keep_connected`: retain the BLE connection between operations.
+- `initial_refresh`: load status and programs when the bridge starts.
+- `ble_connect_timeout`: connection timeout for weak BLE signals.
 
-For unattended operation, create a Windows Task Scheduler task that runs
-`galcon-mqtt.exe --mqtt-host <broker>` at user logon or system startup. Set
-the task to run whether or not a user is logged on. The MQTT bridge is
-headless and does not require the GUI to be open.
+MQTT state messages are retained. Retained command messages are ignored so an
+old command cannot run after the bridge reconnects.
 
-## Building the installer
+## Optional HTTP API
+
+The MQTT bridge can expose a small local API:
+
+```powershell
+python galcon_mqtt.py --mqtt-host homeassistant.local `
+  --http-host 127.0.0.1 --http-port 8765
+```
+
+Endpoints include `GET /api/status`, `GET /api/programs`,
+`POST /api/refresh`, `POST /api/zone/<zone>/set`, and device setting POST
+endpoints. The API has no authentication; do not expose it outside a trusted
+network or bind it publicly without a secured reverse proxy. Set `http_port`
+to `0` to disable it.
+
+## Build The Installer
 
 ```powershell
 pip install cx_Freeze
 python setup_msi.py bdist_msi
 ```
 
-The MSI lands in `dist/`. cx_Freeze bundles the interpreter and the
-architecture-specific native modules that `bleak` depends on, so it cannot
-cross-compile: an x64 Python produces an x64 MSI, an ARM64 Python produces
-an ARM64 MSI. The GitHub Actions workflow in `.github/workflows/build-msi.yml`
-builds both on their respective runners when a `v*` tag is pushed.
+The MSI is written to `dist/`. cx_Freeze builds for the current Python
+interpreter's architecture and cannot cross-compile between x64 and ARM64.
+The release workflow builds both architectures when a `v*` tag is pushed.
 
-## research/
+## Development Notes
 
-`research/` contains one-off scripts used while reverse-engineering the BLE
-protocol (opcode sweeps, raw GATT dumps, HCI snoop log parsing, an early
-enrollment probe, etc.). They are not required to operate the controller and
-are kept only as reference material. Several of them intentionally send
-unusual/undocumented frames to the device - read each script's docstring
-before running it.
+Full protocol notes are in the `control_galcon.py` module docstring. Scripts
+under `research/` were used for protocol investigation and are not required
+for normal operation. Some send undocumented frames; read their docstrings
+before running them.
 
-## Safety note
-
-`20900101` is used both as a wake/keepalive characteristic and as the
-schedule-save pipe. Writing arbitrary short frames to it can unintentionally
-overwrite a zone's saved program (this has been observed and is documented
-in `control_galcon.py`). The shipped tools avoid this; be cautious if you
-modify them.
+The `20900101` characteristic is also the schedule-save pipe. Arbitrary short
+writes can overwrite a saved program. The shipped applications avoid unsafe
+writes.
 
 ## Disclaimer
 
-This project is an independent, unofficial implementation and is NOT
-affiliated with, authorized, maintained, sponsored, or endorsed by Galcon or
-any of its affiliates or subsidiaries. Use this script at your own risk. The
-author is not responsible for any damage to property, over-watering, or
-hardware failure resulting from the use of this software.
+Use this software at your own risk. The author is not responsible for property
+damage, over-watering, or hardware failure resulting from its use.
 
 ## License
 
