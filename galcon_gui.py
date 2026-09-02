@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+import uuid
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -380,6 +381,7 @@ class MqttBridgeSession:
         self.client = None
         self.connected = False
         self._connected_event = asyncio.Event()
+        self._command_results = {}
         self._zone_state = {}
         self._zone_remaining = {}
 
@@ -439,7 +441,10 @@ class MqttBridgeSession:
     def _on_message(self, _client, _userdata, message):
         suffix = message.topic.removeprefix(f"{self.prefix}/")
         text = message.payload.decode("utf-8", errors="replace")
-        if suffix == "availability":
+        if suffix.startswith("command/result/"):
+            self.loop.call_soon_threadsafe(
+                self._complete_command, suffix.rsplit("/", 1)[-1], text)
+        elif suffix == "availability":
             self.ui_queue.put(("bridge_availability", text))
         elif suffix.startswith("zone/") and suffix.endswith("/state"):
             self._zone_state[int(suffix.split("/")[1])] = text == "ON"
@@ -457,8 +462,22 @@ class MqttBridgeSession:
                     zone: self._record_from_details(json.loads(text))}))
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
-        elif suffix == "error":
+        elif suffix == "error" and text:
             self.ui_queue.put(("log", f"[{ts()}] Bridge error: {text}"))
+
+    def _complete_command(self, request_id, text):
+        future = self._command_results.get(request_id)
+        if future is None or future.done():
+            return
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            future.set_exception(RuntimeError("Bridge sent an invalid command result"))
+            return
+        if result.get("success"):
+            future.set_result(None)
+        else:
+            future.set_exception(RuntimeError(result.get("error", "Bridge command failed")))
 
     def _publish_zone_status(self):
         active = {zone: self._zone_remaining.get(zone, 0)
@@ -506,13 +525,26 @@ class MqttBridgeSession:
         if self.client is None or not self.connected:
             raise RuntimeError("Not connected to MQTT bridge")
         topic = self.topic(suffix)
-        info = self.client.publish(topic, payload, qos=1, retain=False)
+        request_id = uuid.uuid4().hex
+        completion = self.loop.create_future()
+        self._command_results[request_id] = completion
+        envelope = json.dumps({"request_id": request_id, "value": payload})
+        self.ui_queue.put(("busy", True))
+        info = self.client.publish(topic, envelope, qos=1, retain=False)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            self._command_results.pop(request_id, None)
+            self.ui_queue.put(("busy", False))
             raise RuntimeError(f"MQTT publish failed with code {info.rc}")
-        await asyncio.to_thread(info.wait_for_publish, timeout=5)
-        if not info.is_published():
-            raise RuntimeError("MQTT broker did not acknowledge the command")
-        self.ui_queue.put(("log", f"[{ts()}] Sent MQTT command: {topic}"))
+        try:
+            await asyncio.to_thread(info.wait_for_publish, timeout=5)
+            if not info.is_published():
+                raise RuntimeError("MQTT broker did not acknowledge the command")
+            self.ui_queue.put(("log", f"[{ts()}] Sent MQTT command: {topic}"))
+            await asyncio.wait_for(completion, timeout=90)
+            self.ui_queue.put(("log", f"[{ts()}] MQTT action completed: {topic}"))
+        finally:
+            self._command_results.pop(request_id, None)
+            self.ui_queue.put(("busy", False))
 
     async def read_status(self):
         await self._publish("refresh", "gui")
@@ -1312,7 +1344,8 @@ class GalconGui(tk.Tk):
             widgets["countdown"].configure(text=self._format_duration(remaining) if active else "--:--")
 
     def _periodic_status(self):
-        if self.connected and self.busy_count == 0:
+        if (self.connected and self.busy_count == 0
+                and self.connection_mode.get() == "ble"):
             self.session.submit(self.session.read_status())
         self.after(10000, self._periodic_status)
 

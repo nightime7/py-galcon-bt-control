@@ -31,6 +31,7 @@ ICON_PATH = ROOT / "galcon.ico"
 STARTUP_VALUE = "GalconGL6100MqttTray"
 STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STARTUP_SHORTCUT_NAME = "Galcon MQTT Bridge.lnk"
+TASKBAR_APP_ID = "nightime7.GalconGL6100.MqttBridge"
 
 
 def legacy_startup_shortcuts():
@@ -231,6 +232,12 @@ class TrayApp:
 
     def _log_window_thread(self):
         try:
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    TASKBAR_APP_ID)
+            except (AttributeError, OSError):
+                pass
             root = tk.Tk()
             root.title("Galcon MQTT Bridge Log")
             root.geometry("900x520")

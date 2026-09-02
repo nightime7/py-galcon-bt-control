@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from cx_Freeze import Executable, setup
-from cx_Freeze.command.bdist_msi import PyDialog, add_data, bdist_msi
+from cx_Freeze.command.bdist_msi import Binary, PyDialog, add_data, bdist_msi
 
 sys.path.insert(0, str(Path(__file__).parent))
 from control_galcon import APP_VERSION  # noqa: E402
@@ -38,6 +38,25 @@ ROOT = Path(__file__).parent
 
 
 class GalconBdistMsi(bdist_msi):
+    def add_config(self):
+        super().add_config()
+        add_data(
+            self.db,
+            "Binary",
+            [("StopGalconAppsScript", Binary(str(ROOT / "stop_galcon_apps.vbs")))],
+        )
+        add_data(
+            self.db,
+            "CustomAction",
+            [("StopGalconApps", 6, "StopGalconAppsScript",
+              "StopGalconApps")],
+        )
+        add_data(
+            self.db,
+            "InstallUISequence",
+            [("StopGalconApps", None, 1299)],
+        )
+
     def add_exit_dialog(self):
         dialog = PyDialog(
             self.db,
@@ -245,7 +264,7 @@ executables = [
 setup(
     name=PRODUCT_NAME,
     version=VERSION,
-    description="Unofficial control tools for Galcon GL6100 BLE irrigation valves",
+    description="Galcon MQTT Bridge",
     options={
         "build_exe": build_exe_options,
         "bdist_msi": bdist_msi_options,

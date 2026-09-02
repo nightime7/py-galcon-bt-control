@@ -126,7 +126,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 
 # Single source of truth for the version; setup_msi.py and the GUI read this.
-APP_VERSION = "1.2.19"
+APP_VERSION = "1.2.30"
 GITHUB_REPO = "nightime7/py-galcon-bt-control"
 
 # The GL6100 advertises under this name regardless of which physical unit
@@ -200,6 +200,9 @@ def decode_active_zones(value: bytes):
         zone = TRANSITIONAL_ZONE_CODES[status_byte]
         return [(zone, value[5] * 60 + value[6])]
     first_index, second_index = status_byte >> 4, status_byte & 0x0f
+    if (first_index == second_index and 0 < first_index < 4):
+        return [(first_index + 1, max(value[2] * 60 + value[3],
+                                      value[5] * 60 + value[6]))]
     if (first_index < 4 and second_index < 4
             and first_index != second_index):
         return [(first_index + 1, value[2] * 60 + value[3]),

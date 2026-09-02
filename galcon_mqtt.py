@@ -272,9 +272,35 @@ class GalconMqttBridge:
             self.log(f"Ignoring retained MQTT command on {message.topic}")
             return
         self.log(f"MQTT command received on {message.topic}")
+        request_id = None
+        payload = message.payload
+        try:
+            envelope = json.loads(payload.decode("utf-8"))
+            if isinstance(envelope, dict) and "request_id" in envelope \
+                    and "value" in envelope:
+                request_id = str(envelope["request_id"])
+                payload = str(envelope["value"]).encode("utf-8")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
         future = asyncio.run_coroutine_threadsafe(
-            self._handle_mqtt(message.topic, message.payload), self.loop)
+            self._handle_mqtt_request(message.topic, payload, request_id), self.loop)
         future.add_done_callback(self._log_future_error)
+
+    async def _handle_mqtt_request(self, topic, payload, request_id=None):
+        try:
+            await self._handle_mqtt(topic, payload)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"MQTT command failed: {type(exc).__name__}: {exc}")
+            self._publish("error", str(exc), retain=False)
+            if request_id:
+                self._publish(f"command/result/{request_id}", json.dumps({
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }), retain=False)
+            return
+        if request_id:
+            self._publish(f"command/result/{request_id}",
+                          json.dumps({"success": True}), retain=False)
 
     def _log_future_error(self, future):
         try:
@@ -283,7 +309,7 @@ class GalconMqttBridge:
             return
         except Exception as exc:  # noqa: BLE001
             self.log(f"MQTT command failed: {type(exc).__name__}: {exc}")
-            self._publish("error", str(exc))
+            self._publish("error", str(exc), retain=False)
 
     async def _ble_loop(self):
         if self.args.poll_interval <= 0:
@@ -300,7 +326,8 @@ class GalconMqttBridge:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.log(f"BLE session failed: {type(exc).__name__}: {exc}")
-                self._publish("error", f"{type(exc).__name__}: {exc}")
+                self._publish("error", f"{type(exc).__name__}: {exc}",
+                              retain=False)
                 self._set_ble_state("disconnected")
             finally:
                 await self._disconnect_ble()
@@ -462,7 +489,8 @@ class GalconMqttBridge:
             self._publish("status", "unknown")
             self._publish("active_zone", 0)
             self._publish("active_zones", "[]")
-            self._publish("error", f"Invalid status frame: 0x{value[0]:02x}")
+            self._publish("error", f"Invalid status frame: 0x{value[0]:02x}",
+                          retain=False)
             return
         self.last_status_at = time.monotonic()
         active = self.active_zone
@@ -476,6 +504,7 @@ class GalconMqttBridge:
             self._publish(f"zone/{zone}/remaining", zone_remaining
                           if is_active else 0)
         self._publish("last_update", utc_now())
+        self._publish("error", "", retain=True)
 
     async def _poll_programs(self):
         async with self.command_lock:
@@ -745,9 +774,10 @@ class GalconMqttBridge:
             f"homeassistant/{component}/{self.prefix}/{object_id}/config",
             json.dumps(config), qos=1, retain=True)
 
-    def _publish(self, suffix, payload):
+    def _publish(self, suffix, payload, retain=True):
         if self.mqtt is not None:
-            self.mqtt.publish(self.topic(suffix), str(payload), qos=1, retain=True)
+            self.mqtt.publish(self.topic(suffix), str(payload), qos=1,
+                              retain=retain)
 
     def _set_ble_state(self, state):
         if state == self.ble_state:
