@@ -140,8 +140,11 @@ MQTT Discovery creates:
 
 - Controller connection, status, active-zone, and last-update sensors
 - A manual on/off switch and remaining-time sensor for each zone
-- Program mode, next-run, and editable duration for each zone
-- Enable, hour, and minute controls for four program windows per zone
+- Program mode, next-run, and pending duration input for each zone
+- Seven pending weekday switches per zone; the selected days apply to every
+  enabled window in that zone
+- Pending enable, hour, and minute inputs for four program windows per zone,
+  with per-zone buttons to apply or discard all pending program values
 - Seasonal-adjustment and rain-off controls
 - A status refresh button
 
@@ -157,11 +160,27 @@ galcon_gl6100/device/seasonal/set     100
 galcon_gl6100/device/rainoff/set      0
 galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
 galcon_gl6100/zone/1/program/set      {"window": 2, "enabled": true, "hour": 14, "minute": 30}
+galcon_gl6100/zone/1/program/pending/duration/set         15
+galcon_gl6100/zone/1/program/pending/day/monday/set       ON
+galcon_gl6100/zone/1/program/pending/window/2/enabled/set ON
+galcon_gl6100/zone/1/program/pending/window/2/hour/set    14
+galcon_gl6100/zone/1/program/pending/window/2/minute/set  30
+galcon_gl6100/zone/1/program/commit                         commit
+galcon_gl6100/zone/1/program/discard                        discard
 ```
 
 Program JSON supports `duration`, `days`, `cadence`, and `start_in`. Use
 `window` from 1 through 4 with `enabled`, `hour`, or `minute` to edit a
 specific start window. Without `window`, `hour` and `minute` target window 1.
+Home Assistant's duration, window enable, window hour, and window minute
+entities, along with Sunday-Saturday switches, use the `pending` topics:
+changing them does not connect to the controller. The weekday selection is
+shared by all enabled windows in a zone; changing a weekday on a cyclic program
+converts it to weekly mode when committed. Press that zone's **Apply program
+changes** button to write all pending values in one read-modify-write operation.
+Pending values are kept after a failed commit so the operation can be retried.
+Press **Discard pending changes** to restore every staged entity to its value
+from before editing, without connecting to the controller.
 
 ### Connection Behavior
 
