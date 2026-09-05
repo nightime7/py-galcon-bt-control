@@ -15,6 +15,12 @@ State topics:
 Command topics:
     galcon_gl6100/zone/1/set       ON, OFF, or OPEN:5
     galcon_gl6100/zone/1/program/set  JSON schedule record/edit
+    galcon_gl6100/zone/1/program/pending/duration/set  0-600
+    galcon_gl6100/zone/1/program/pending/window/1/enabled/set  ON or OFF
+    galcon_gl6100/zone/1/program/pending/window/1/hour/set  0-23
+    galcon_gl6100/zone/1/program/pending/window/1/minute/set  0-59
+    galcon_gl6100/zone/1/program/commit  apply pending program values
+    galcon_gl6100/zone/1/program/discard  discard pending program changes
     galcon_gl6100/device/seasonal/set  100
     galcon_gl6100/device/rainoff/set  0
     galcon_gl6100/refresh           any payload
@@ -40,6 +46,7 @@ from control_galcon import (
     CHAR_POLL,
     CHAR_STATUS,
     CHAR_VALVE,
+    DAY_NAMES,
     GITHUB_REPO,
     REPAIR_HINT,
     SERVICE_UUID,
@@ -64,6 +71,7 @@ DEFAULT_POLL_INTERVAL = 0
 DEFAULT_IDLE_GRACE = 120
 DEFAULT_BLE_CONNECT_TIMEOUT = 60
 BLE_IDLE_KEEPALIVE_INTERVAL = 15
+WEEKDAY_SLUGS = tuple(name.lower() for name in DAY_NAMES)
 APP_CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Galcon GL6100 Control"
 MQTT_CONFIG_PATH = APP_CONFIG_DIR / "galcon_mqtt.json"
 LEGACY_MQTT_CONFIG_PATH = Path(__file__).with_name("galcon_mqtt.json")
@@ -102,11 +110,35 @@ def apply_program_changes(record, changes):
     }
     kwargs = {allowed[key]: value for key, value in changes.items()
               if key in allowed}
+    weekdays = changes.get("weekdays")
+    if weekdays is not None:
+        if not isinstance(weekdays, dict):
+            raise ValueError("weekdays must be a JSON object")
+        days_mask = int(changes.get("days", record[4])) & 0x7f
+        for day, enabled in weekdays.items():
+            if day not in WEEKDAY_SLUGS:
+                raise ValueError(f"unknown weekday: {day}")
+            if not isinstance(enabled, bool):
+                raise ValueError("weekday values must be true or false")
+            bit = 1 << WEEKDAY_SLUGS.index(day)
+            days_mask = days_mask | bit if enabled else days_mask & ~bit
+        kwargs["days_mask"] = days_mask
+    updated = modify_schedule(record, **kwargs)
+    windows = changes.get("windows")
+    if windows is not None:
+        if not isinstance(windows, list):
+            raise ValueError("windows must be a JSON array")
+        for window_changes in windows:
+            if not isinstance(window_changes, dict):
+                raise ValueError("each windows item must be a JSON object")
+            updated = apply_program_changes(updated, window_changes)
+        return updated
+
     window = changes.get("window")
     if window is None:
-        kwargs.update({key: changes[key] for key in ("hour", "minute")
-                       if key in changes})
-        return modify_schedule(record, **kwargs)
+        legacy = {key: changes[key] for key in ("hour", "minute")
+                  if key in changes}
+        return modify_schedule(updated, **legacy)
 
     try:
         window = int(window)
@@ -115,8 +147,18 @@ def apply_program_changes(record, changes):
     if not 1 <= window <= 4:
         raise ValueError("window must be 1-4")
 
-    updated = bytearray(modify_schedule(record, **kwargs))
+    updated = bytearray(updated)
     position = 5 + (window - 1) * 2
+    if "hour" in changes:
+        hour = int(changes["hour"])
+        if not 0 <= hour <= 23:
+            raise ValueError("window hour must be 0-23")
+        updated[position] = hour
+    if "minute" in changes:
+        minute = int(changes["minute"])
+        if not 0 <= minute <= 59:
+            raise ValueError("window minute must be 0-59")
+        updated[position + 1] = minute
     enabled = changes.get("enabled")
     if enabled is not None:
         if not isinstance(enabled, bool):
@@ -128,16 +170,6 @@ def apply_program_changes(record, changes):
         else:
             updated[position] = 0xff
             updated[position + 1] = 0
-    if "hour" in changes:
-        hour = int(changes["hour"])
-        if not 0 <= hour <= 23:
-            raise ValueError("window hour must be 0-23")
-        updated[position] = hour
-    if "minute" in changes:
-        minute = int(changes["minute"])
-        if not 0 <= minute <= 59:
-            raise ValueError("window minute must be 0-59")
-        updated[position + 1] = minute
     return bytes(updated)
 
 
@@ -154,6 +186,10 @@ class GalconMqttBridge:
         self.device = None
         self.status = bytes([0xff]) + bytes(19)
         self.programs = {}
+        self.pending_program_baselines = {}
+        self.pending_day_changes = {}
+        self.pending_duration_changes = {}
+        self.pending_window_changes = {}
         self.last_status_at = 0.0
         self.active_zone = None
         self.active_zones = []
@@ -310,6 +346,14 @@ class GalconMqttBridge:
         self.loop.call_soon_threadsafe(self.mqtt_connected.set)
         self.mqtt.subscribe(self.topic("zone/+/set"), qos=1)
         self.mqtt.subscribe(self.topic("zone/+/program/set"), qos=1)
+        self.mqtt.subscribe(
+            self.topic("zone/+/program/pending/duration/set"), qos=1)
+        self.mqtt.subscribe(
+            self.topic("zone/+/program/pending/day/+/set"), qos=1)
+        self.mqtt.subscribe(
+            self.topic("zone/+/program/pending/window/+/+/set"), qos=1)
+        self.mqtt.subscribe(self.topic("zone/+/program/commit"), qos=1)
+        self.mqtt.subscribe(self.topic("zone/+/program/discard"), qos=1)
         self.mqtt.subscribe(self.topic("device/seasonal/set"), qos=1)
         self.mqtt.subscribe(self.topic("device/rainoff/set"), qos=1)
         self.mqtt.subscribe(self.topic("refresh"), qos=1)
@@ -565,6 +609,35 @@ class GalconMqttBridge:
     async def _handle_mqtt(self, topic, payload):
         text = payload.decode("utf-8").strip()
         retain_ble = False
+        suffix = topic[len(self.prefix) + 1:].split("/") \
+            if topic.startswith(f"{self.prefix}/") else []
+        async with self.request_lock:
+            if len(suffix) == 4 and suffix[:1] == ["zone"] \
+                    and suffix[2:] == ["program", "discard"]:
+                self._discard_pending_program(int(suffix[1]))
+                return
+            if len(suffix) == 6 and suffix[:1] == ["zone"] \
+                    and suffix[2:5] == ["program", "pending", "duration"] \
+                    and suffix[5] == "set":
+                self._set_pending_duration(int(suffix[1]), text)
+                return
+            if len(suffix) == 7 and suffix[:1] == ["zone"] \
+                    and suffix[2:5] == ["program", "pending", "day"] \
+                    and suffix[6] == "set":
+                self._set_pending_day(int(suffix[1]), suffix[5], text)
+                return
+            if len(suffix) == 8 and suffix[:1] == ["zone"] \
+                    and suffix[2:5] == ["program", "pending", "window"] \
+                    and suffix[7] == "set":
+                self._set_pending_window_value(
+                    int(suffix[1]), int(suffix[5]), suffix[6], text)
+                return
+            if len(suffix) == 4 and suffix[:1] == ["zone"] \
+                    and suffix[2:] == ["program", "commit"] \
+                    and not self._has_pending_program_changes(int(suffix[1])):
+                self.log(f"Zone {suffix[1]} has no pending program changes")
+                return
+
         if not self.args.keep_connected:
             self._reset_idle_disconnect()
         try:
@@ -608,6 +681,12 @@ class GalconMqttBridge:
                     zone = int(parts[-3])
                     await self._set_program(zone, text)
                     retain_ble = True
+                    return
+                if len(suffix) == 4 and suffix[:1] == ["zone"] \
+                        and suffix[2:] == ["program", "commit"]:
+                    await self._commit_pending_program(int(suffix[1]))
+                    retain_ble = True
+                    return
         finally:
             if not self.args.keep_connected and not self.stop_event.is_set():
                 if retain_ble:
@@ -672,6 +751,118 @@ class GalconMqttBridge:
             self.programs[zone] = confirmed
             self._publish_program(zone, confirmed)
 
+    def _set_pending_window_value(self, zone, window, field, value):
+        if not 1 <= zone <= ZONE_COUNT:
+            raise ValueError("zone must be 1-4")
+        if not 1 <= window <= 4:
+            raise ValueError("window must be 1-4")
+        self._capture_pending_program_baseline(zone)
+        if field == "enabled":
+            normalized = str(value).strip().upper()
+            if normalized not in ("ON", "OFF", "TRUE", "FALSE", "1", "0"):
+                raise ValueError("window enabled must be ON or OFF")
+            value = normalized in ("ON", "TRUE", "1")
+            published_value = "ON" if value else "OFF"
+        else:
+            maximum = {"hour": 23, "minute": 59}.get(field)
+            if maximum is None:
+                raise ValueError(
+                    "pending window field must be enabled, hour, or minute")
+            value = int(value)
+            if not 0 <= value <= maximum:
+                raise ValueError(f"window {field} must be 0-{maximum}")
+            published_value = value
+        changes = self.pending_window_changes.setdefault(zone, {})
+        changes[(window, field)] = value
+        self._publish(
+            f"zone/{zone}/program/pending/window/{window}/{field}",
+            published_value)
+        self.log(
+            f"Zone {zone} window {window} {field} pending: {published_value}")
+
+    def _set_pending_duration(self, zone, value):
+        if not 1 <= zone <= ZONE_COUNT:
+            raise ValueError("zone must be 1-4")
+        value = int(value)
+        if not 0 <= value <= 600:
+            raise ValueError("program duration must be 0-600")
+        self._capture_pending_program_baseline(zone)
+        self.pending_duration_changes[zone] = value
+        self._publish(f"zone/{zone}/program/pending/duration", value)
+        self.log(f"Zone {zone} duration pending: {value} minutes")
+
+    def _set_pending_day(self, zone, day, value):
+        if not 1 <= zone <= ZONE_COUNT:
+            raise ValueError("zone must be 1-4")
+        day = day.lower()
+        if day not in WEEKDAY_SLUGS:
+            raise ValueError(f"unknown weekday: {day}")
+        normalized = str(value).strip().upper()
+        if normalized not in ("ON", "OFF", "TRUE", "FALSE", "1", "0"):
+            raise ValueError("weekday enabled must be ON or OFF")
+        enabled = normalized in ("ON", "TRUE", "1")
+        self._capture_pending_program_baseline(zone)
+        self.pending_day_changes.setdefault(zone, {})[day] = enabled
+        self._publish(
+            f"zone/{zone}/program/pending/day/{day}",
+            "ON" if enabled else "OFF")
+        self.log(f"Zone {zone} {day} pending: "
+                 f"{'ON' if enabled else 'OFF'}")
+
+    def _has_pending_program_changes(self, zone):
+        return bool(self.pending_day_changes.get(zone)) \
+            or zone in self.pending_duration_changes \
+            or bool(self.pending_window_changes.get(zone))
+
+    def _capture_pending_program_baseline(self, zone):
+        if zone not in self.pending_program_baselines:
+            self.pending_program_baselines[zone] = self.programs.get(zone)
+
+    def _discard_pending_program(self, zone):
+        if not 1 <= zone <= ZONE_COUNT:
+            raise ValueError("zone must be 1-4")
+        had_changes = self._has_pending_program_changes(zone)
+        baseline = self.pending_program_baselines.pop(zone, None)
+        self.pending_day_changes.pop(zone, None)
+        self.pending_duration_changes.pop(zone, None)
+        self.pending_window_changes.pop(zone, None)
+        record = baseline or self.programs.get(zone)
+        if record is not None:
+            self._publish_pending_program_states(zone, record)
+        else:
+            self._clear_pending_program_states(zone)
+        self.log(f"Zone {zone} pending program changes "
+                 f"{'discarded' if had_changes else 'already clear'}")
+
+    async def _commit_pending_program(self, zone):
+        changes = self.pending_window_changes.get(zone, {})
+        if not self._has_pending_program_changes(zone):
+            self.log(f"Zone {zone} has no pending program changes")
+            return
+        windows = []
+        for window in range(1, 5):
+            window_changes = {
+                field: changes[(window, field)]
+                for field in ("enabled", "hour", "minute")
+                if (window, field) in changes
+            }
+            if window_changes:
+                windows.append({"window": window, **window_changes})
+        program_changes = {"windows": windows}
+        if zone in self.pending_day_changes:
+            program_changes["weekdays"] = self.pending_day_changes[zone]
+        if zone in self.pending_duration_changes:
+            program_changes["duration"] = self.pending_duration_changes[zone]
+        await self._set_program(zone, json.dumps(program_changes))
+        self.pending_program_baselines.pop(zone, None)
+        self.pending_day_changes.pop(zone, None)
+        self.pending_duration_changes.pop(zone, None)
+        self.pending_window_changes.pop(zone, None)
+        record = self.programs.get(zone)
+        if record is not None:
+            self._publish_pending_program_states(zone, record)
+        self.log(f"Zone {zone} pending program changes committed")
+
     async def _confirm_program_save(self, zone, requested):
         for _attempt in range(10):
             await asyncio.sleep(0.6)
@@ -708,6 +899,44 @@ class GalconMqttBridge:
         self._publish(f"zone/{zone}/program/duration", payload["duration_minutes"])
         self._publish(f"zone/{zone}/program/next_run",
                       next_run.isoformat() if next_run else "off")
+        self._publish_pending_program_states(zone, record)
+
+    def _publish_pending_program_states(self, zone, record):
+        day_changes = self.pending_day_changes.get(zone, {})
+        days_mask = record[4] & 0x7f
+        for bit, day in enumerate(WEEKDAY_SLUGS):
+            enabled = day_changes.get(day, bool(days_mask & (1 << bit)))
+            self._publish(
+                f"zone/{zone}/program/pending/day/{day}",
+                "ON" if enabled else "OFF")
+        duration = self.pending_duration_changes.get(
+            zone, record[1] * 60 + record[2])
+        self._publish(f"zone/{zone}/program/pending/duration", duration)
+        changes = self.pending_window_changes.get(zone, {})
+        for window, position in enumerate((5, 7, 9, 11), 1):
+            enabled = record[position] != 0xff
+            actual = {
+                "enabled": enabled,
+                "hour": record[position] if enabled else 0,
+                "minute": record[position + 1] if enabled else 0,
+            }
+            for field in ("enabled", "hour", "minute"):
+                value = changes.get((window, field), actual[field])
+                if field == "enabled":
+                    value = "ON" if value else "OFF"
+                self._publish(
+                    f"zone/{zone}/program/pending/window/{window}/{field}",
+                    value)
+
+    def _clear_pending_program_states(self, zone):
+        for day in WEEKDAY_SLUGS:
+            self._publish(f"zone/{zone}/program/pending/day/{day}", "")
+        self._publish(f"zone/{zone}/program/pending/duration", "")
+        for window in range(1, 5):
+            for field in ("enabled", "hour", "minute"):
+                self._publish(
+                    f"zone/{zone}/program/pending/window/{window}/{field}",
+                    "")
 
     def _next_program_run(self, record):
         now = datetime.now().astimezone().replace(second=0, microsecond=0)
@@ -774,12 +1003,11 @@ class GalconMqttBridge:
             self._discovery(
                 "number", f"zone_{zone}_program_duration",
                 f"Zone {zone} program duration",
-                f"zone/{zone}/program/duration",
-                f"zone/{zone}/program/set",
+                f"zone/{zone}/program/pending/duration",
+                f"zone/{zone}/program/pending/duration/set",
                 {"min": 0, "max": 600, "step": 1, "mode": "box",
-                 "unit_of_measurement": "min",
-                 "command_template":
-                     '{"duration": {{ value | int }}}'}, zd)
+                 "unit_of_measurement": "min"}, zd)
+            self._publish(f"zone/{zone}/program/pending/duration", "")
             self.mqtt.publish(
                 f"homeassistant/sensor/{self.prefix}/"
                 f"zone_{zone}_program_duration/config",
@@ -789,34 +1017,43 @@ class GalconMqttBridge:
                             f"zone/{zone}/program/next_run", None,
                             {"device_class": "timestamp",
                              "icon": "mdi:calendar-clock"}, zd)
-            for index in range(4):
-                window = index + 1
-                details = f"zone/{zone}/program/details"
-                command = f"zone/{zone}/program/set"
+            self._discovery(
+                "button", f"zone_{zone}_program_commit",
+                "Apply program changes", None,
+                f"zone/{zone}/program/commit",
+                {"icon": "mdi:content-save"}, zd,
+                payload_press="commit")
+            self._discovery(
+                "button", f"zone_{zone}_program_discard",
+                "Discard pending changes", None,
+                f"zone/{zone}/program/discard",
+                {"icon": "mdi:undo-variant"}, zd,
+                payload_press="discard")
+            for day in WEEKDAY_SLUGS:
+                pending_day = f"zone/{zone}/program/pending/day/{day}"
+                self._discovery(
+                    "switch", f"zone_{zone}_day_{day}",
+                    day.title(), pending_day, f"{pending_day}/set",
+                    {"icon": "mdi:calendar-week"}, zd,
+                    payload_on="ON", payload_off="OFF")
+                self._publish(pending_day, "")
+            for window in range(1, 5):
+                pending = f"zone/{zone}/program/pending/window/{window}"
                 self._discovery(
                     "switch", f"zone_{zone}_window_{window}_enabled",
-                    f"Window {window}", details, command,
-                    {"icon": "mdi:calendar-clock",
-                     "value_template":
-                         "{{ 'ON' if value_json.windows["
-                         f"{index}].enabled else 'OFF' }}}}",
-                     "command_template":
-                         '{"window": ' + str(window) +
-                         ', "enabled": {{ (value == \'ON\') | lower }}}'},
+                    f"Window {window}", f"{pending}/enabled",
+                    f"{pending}/enabled/set",
+                    {"icon": "mdi:calendar-clock"},
                     zd, payload_on="ON", payload_off="OFF")
+                self._publish(f"{pending}/enabled", "")
                 for field, maximum in (("hour", 23), ("minute", 59)):
                     self._discovery(
                         "number", f"zone_{zone}_window_{window}_{field}",
-                        f"Window {window} {field}", details, command,
+                        f"Window {window} {field}",
+                        f"{pending}/{field}", f"{pending}/{field}/set",
                         {"min": 0, "max": maximum, "step": 1,
-                         "mode": "box",
-                         "value_template":
-                             "{{ value_json.windows[" + str(index) +
-                             "]." + field + " if value_json.windows[" +
-                             str(index) + "].enabled else 0 }}",
-                         "command_template":
-                             '{"window": ' + str(window) + ', "' + field +
-                             '": {{ value | int }}}'}, zd)
+                         "mode": "box"}, zd)
+                    self._publish(f"{pending}/{field}", "")
         self._discovery("number", "seasonal", "Seasonal adjustment",
                         "device/seasonal", "device/seasonal/set",
                         {"min": 0, "max": 250, "step": 1, "unit_of_measurement": "%"}, device)
