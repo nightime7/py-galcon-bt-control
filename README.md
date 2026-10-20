@@ -139,7 +139,8 @@ containing broker credentials.
 MQTT Discovery creates:
 
 - Controller connection, status, active-zone, and last-update sensors
-- A manual on/off switch and remaining-time sensor for each zone
+- A manual on/off switch, duration input, and remaining-time sensor for each
+  zone
 - Program mode, next-run, and pending duration input for each zone
 - Seven pending weekday switches per zone; the selected days apply to every
   enabled window in that zone
@@ -155,6 +156,7 @@ running more than one bridge.
 
 ```text
 galcon_gl6100/zone/1/set              ON, OFF, OPEN:5, or CLOSE
+galcon_gl6100/zone/1/manual_duration/set                  30
 galcon_gl6100/refresh                 any payload
 galcon_gl6100/device/seasonal/set     100
 galcon_gl6100/device/rainoff/set      0
@@ -168,6 +170,11 @@ galcon_gl6100/zone/1/program/pending/window/2/minute/set  30
 galcon_gl6100/zone/1/program/commit                         commit
 galcon_gl6100/zone/1/program/discard                        discard
 ```
+
+Set a zone's **Manual duration** before turning its zone switch on. A plain
+`ON` command uses that per-zone value (one minute by default); `OPEN:30`
+provides an explicit duration for one command. The separate **Program
+duration** controls scheduled watering and does not set manual run time.
 
 Program JSON supports `duration`, `days`, `cadence`, and `start_in`. Use
 `window` from 1 through 4 with `enabled`, `hour`, or `minute` to edit a

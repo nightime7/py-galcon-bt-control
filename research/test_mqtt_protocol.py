@@ -12,7 +12,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from galcon_mqtt import GalconMqttBridge, apply_program_changes  # noqa: E402
+from galcon_mqtt import (  # noqa: E402
+    GalconMqttBridge,
+    apply_program_changes,
+    build_zone_command_payload,
+)
 
 
 class FakeBridge(GalconMqttBridge):
@@ -78,6 +82,15 @@ async def main():
     )
     assert bridge.max_in_flight == 1
 
+    manual_payload, manual_minutes = build_zone_command_payload(2, "ON", 30)
+    assert manual_minutes == 30
+    assert manual_payload[1] == 0x82
+    assert manual_payload[4] == 30
+    override_payload, override_minutes = build_zone_command_payload(
+        2, "OPEN:45", 30)
+    assert override_minutes == 45
+    assert override_payload[4] == 45
+
     record = bytes.fromhex(
         "01000f007f06001e00ff00ff0080000000000000")
     duration_update = apply_program_changes(record, {"duration": 125})
@@ -122,6 +135,14 @@ async def main():
         if topic.endswith("/config") and payload
     }
     for zone in range(1, 5):
+        manual_duration_topic = (
+            f"homeassistant/number/test/zone_{zone}_manual_duration/config")
+        manual_duration = discovery[manual_duration_topic]
+        manual_state = f"test/zone/{zone}/manual_duration"
+        assert manual_duration["state_topic"] == manual_state
+        assert manual_duration["command_topic"] == f"{manual_state}/set"
+        assert manual_duration["min"] == 1
+        assert manual_duration["max"] == 255
         duration_topic = (
             f"homeassistant/number/test/zone_{zone}_program_duration/config")
         duration = discovery[duration_topic]
@@ -169,6 +190,10 @@ async def main():
                 assert "command_template" not in config
 
     before_pending = bridge.ble_connect_calls
+    await bridge._handle_mqtt(
+        "test/zone/2/manual_duration/set", b"30")
+    assert bridge.ble_connect_calls == before_pending
+    assert bridge.manual_durations[2] == 30
     await bridge._handle_mqtt(
         "test/zone/2/program/pending/duration/set", b"125")
     await bridge._handle_mqtt(
@@ -258,6 +283,7 @@ async def main():
     print("Home Assistant window controls: 48 discovery entities")
     print("Home Assistant weekday controls: 28 discovery entities")
     print("Home Assistant duration controls: 4 number entities")
+    print("Manual ON duration: per-zone value encoded in BLE byte 4")
     print("Pending duration/day/window edits: staged until zone commit")
     print("Discard pending changes: restores pre-edit values without BLE")
     print("Singles: zones 1, 2, 3, 4")

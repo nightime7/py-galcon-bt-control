@@ -71,6 +71,7 @@ DEFAULT_POLL_INTERVAL = 0
 DEFAULT_IDLE_GRACE = 120
 DEFAULT_BLE_CONNECT_TIMEOUT = 60
 BLE_IDLE_KEEPALIVE_INTERVAL = 15
+DEFAULT_MANUAL_DURATION = 1
 WEEKDAY_SLUGS = tuple(name.lower() for name in DAY_NAMES)
 APP_CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Galcon GL6100 Control"
 MQTT_CONFIG_PATH = APP_CONFIG_DIR / "galcon_mqtt.json"
@@ -173,6 +174,26 @@ def apply_program_changes(record, changes):
     return bytes(updated)
 
 
+def build_zone_command_payload(zone, value, default_minutes=1):
+    if not 1 <= zone <= ZONE_COUNT:
+        raise ValueError("zone must be 1-4")
+    normalized = value.strip().upper()
+    if normalized in ("OFF", "0", "CLOSE"):
+        return build_close_payload(zone), None
+
+    minutes = default_minutes
+    if ":" in value:
+        command, raw_minutes = value.split(":", 1)
+        if command.strip().upper() not in ("ON", "OPEN"):
+            raise ValueError("zone command must be ON, OFF, OPEN:n, or CLOSE")
+        minutes = int(raw_minutes)
+    elif normalized not in ("ON", "OPEN", "1"):
+        raise ValueError("zone command must be ON, OFF, OPEN:n, or CLOSE")
+    if not 1 <= minutes <= 255:
+        raise ValueError("manual duration must be 1-255 minutes")
+    return build_open_payload(zone, minutes), minutes
+
+
 class GalconMqttBridge:
     def __init__(self, args):
         self.args = args
@@ -190,6 +211,10 @@ class GalconMqttBridge:
         self.pending_day_changes = {}
         self.pending_duration_changes = {}
         self.pending_window_changes = {}
+        self.manual_durations = {
+            zone: DEFAULT_MANUAL_DURATION
+            for zone in range(1, ZONE_COUNT + 1)
+        }
         self.last_status_at = 0.0
         self.active_zone = None
         self.active_zones = []
@@ -345,6 +370,7 @@ class GalconMqttBridge:
         self.log(f"MQTT connected to {self.args.mqtt_host}:{self.args.mqtt_port}")
         self.loop.call_soon_threadsafe(self.mqtt_connected.set)
         self.mqtt.subscribe(self.topic("zone/+/set"), qos=1)
+        self.mqtt.subscribe(self.topic("zone/+/manual_duration/set"), qos=1)
         self.mqtt.subscribe(self.topic("zone/+/program/set"), qos=1)
         self.mqtt.subscribe(
             self.topic("zone/+/program/pending/duration/set"), qos=1)
@@ -613,6 +639,10 @@ class GalconMqttBridge:
             if topic.startswith(f"{self.prefix}/") else []
         async with self.request_lock:
             if len(suffix) == 4 and suffix[:1] == ["zone"] \
+                    and suffix[2:] == ["manual_duration", "set"]:
+                self._set_manual_duration(int(suffix[1]), text)
+                return
+            if len(suffix) == 4 and suffix[:1] == ["zone"] \
                     and suffix[2:] == ["program", "discard"]:
                 self._discard_pending_program(int(suffix[1]))
                 return
@@ -695,24 +725,25 @@ class GalconMqttBridge:
                     await self._disconnect_ble()
 
     async def _set_zone(self, zone, value):
-        if not 1 <= zone <= ZONE_COUNT:
-            raise ValueError("zone must be 1-4")
-        if value.upper() in ("OFF", "0", "CLOSE"):
-            payload = build_close_payload(zone)
-        else:
-            minutes = 1
-            if ":" in value:
-                command, raw_minutes = value.split(":", 1)
-                if command.upper() not in ("ON", "OPEN"):
-                    raise ValueError("zone command must be ON, OFF, OPEN:n, or CLOSE")
-                minutes = int(raw_minutes)
-            elif value.upper() not in ("ON", "OPEN", "1"):
-                raise ValueError("zone command must be ON, OFF, OPEN:n, or CLOSE")
-            payload = build_open_payload(zone, minutes)
+        payload, minutes = build_zone_command_payload(
+            zone, value, self.manual_durations.get(
+                zone, DEFAULT_MANUAL_DURATION))
+        if minutes is not None:
+            self.log(f"Zone {zone} manual watering requested for {minutes} minutes")
         async with self.command_lock:
             await write_char(self.client, CHAR_VALVE, payload, f"ZONE {zone} {value}")
         await asyncio.sleep(1.0)
         await self._poll_status()
+
+    def _set_manual_duration(self, zone, value):
+        if not 1 <= zone <= ZONE_COUNT:
+            raise ValueError("zone must be 1-4")
+        minutes = int(value)
+        if not 1 <= minutes <= 255:
+            raise ValueError("manual duration must be 1-255 minutes")
+        self.manual_durations[zone] = minutes
+        self._publish(f"zone/{zone}/manual_duration", minutes)
+        self.log(f"Zone {zone} manual duration set to {minutes} minutes")
 
     async def _set_program(self, zone, text):
         if not 1 <= zone <= ZONE_COUNT:
@@ -992,6 +1023,16 @@ class GalconMqttBridge:
             self._discovery("switch", f"zone_{zone}", f"Zone {zone}",
                             f"zone/{zone}/state", f"zone/{zone}/set",
                             {}, zd, payload_on="ON", payload_off="OFF")
+            self._discovery(
+                "number", f"zone_{zone}_manual_duration",
+                f"Zone {zone} manual duration",
+                f"zone/{zone}/manual_duration",
+                f"zone/{zone}/manual_duration/set",
+                {"min": 1, "max": 255, "step": 1, "mode": "box",
+                 "unit_of_measurement": "min"}, zd)
+            self._publish(
+                f"zone/{zone}/manual_duration",
+                self.manual_durations[zone])
             self._discovery("sensor", f"zone_{zone}_remaining",
                             f"Zone {zone} remaining", f"zone/{zone}/remaining",
                             f"zone/{zone}/remaining", {"unit_of_measurement": "s"}, zd)
