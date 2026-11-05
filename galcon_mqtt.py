@@ -21,8 +21,11 @@ Command topics:
     galcon_gl6100/zone/1/program/pending/window/1/minute/set  0-59
     galcon_gl6100/zone/1/program/commit  apply pending program values
     galcon_gl6100/zone/1/program/discard  discard pending program changes
-    galcon_gl6100/device/seasonal/set  100
+    galcon_gl6100/device/seasonal/set  0-250 in increments of 10
+    galcon_gl6100/device/seasonal/enabled/set  OFF to stage 100%
     galcon_gl6100/device/rainoff/set  0
+    galcon_gl6100/device/program/commit  apply pending device settings
+    galcon_gl6100/device/program/discard  discard pending device settings
     galcon_gl6100/refresh           any payload
 """
 
@@ -47,8 +50,10 @@ from control_galcon import (
     CHAR_STATUS,
     CHAR_VALVE,
     DAY_NAMES,
+    DEFAULT_SEASONAL_PERCENT,
     GITHUB_REPO,
     REPAIR_HINT,
+    SEASONAL_DISABLED_PERCENT,
     SERVICE_UUID,
     STATUS_POLL,
     build_close_payload,
@@ -56,6 +61,7 @@ from control_galcon import (
     build_rainoff_payload,
     build_seasonal_payload,
     decode_active_zones,
+    decode_seasonal_percent,
     find_device,
     load_saved_mac,
     load_saved_pin,
@@ -215,6 +221,11 @@ class GalconMqttBridge:
             zone: DEFAULT_MANUAL_DURATION
             for zone in range(1, ZONE_COUNT + 1)
         }
+        self.seasonal_percent = DEFAULT_SEASONAL_PERCENT
+        self.seasonal_enabled = False
+        self.rainoff_days = 0
+        self.pending_seasonal_percent = None
+        self.pending_rainoff_days = None
         self.last_status_at = 0.0
         self.active_zone = None
         self.active_zones = []
@@ -381,7 +392,10 @@ class GalconMqttBridge:
         self.mqtt.subscribe(self.topic("zone/+/program/commit"), qos=1)
         self.mqtt.subscribe(self.topic("zone/+/program/discard"), qos=1)
         self.mqtt.subscribe(self.topic("device/seasonal/set"), qos=1)
+        self.mqtt.subscribe(self.topic("device/seasonal/enabled/set"), qos=1)
         self.mqtt.subscribe(self.topic("device/rainoff/set"), qos=1)
+        self.mqtt.subscribe(self.topic("device/program/commit"), qos=1)
+        self.mqtt.subscribe(self.topic("device/program/discard"), qos=1)
         self.mqtt.subscribe(self.topic("refresh"), qos=1)
         self.mqtt.publish(self.topic("availability"), "online", qos=1, retain=True)
 
@@ -621,6 +635,15 @@ class GalconMqttBridge:
             self._publish(f"zone/{zone}/state", "ON" if is_active else "OFF")
             self._publish(f"zone/{zone}/remaining", zone_remaining
                           if is_active else 0)
+        seasonal_percent = decode_seasonal_percent(value)
+        if seasonal_percent is not None:
+            self.seasonal_percent = seasonal_percent
+            self.seasonal_enabled = (
+                seasonal_percent != SEASONAL_DISABLED_PERCENT)
+            if self.pending_seasonal_percent is None:
+                self._publish("device/seasonal", self.seasonal_percent)
+                self._publish("device/seasonal/enabled",
+                              "ON" if self.seasonal_enabled else "OFF")
         self._publish("last_update", utc_now())
         self._publish("error", "", retain=True)
 
@@ -638,6 +661,22 @@ class GalconMqttBridge:
         suffix = topic[len(self.prefix) + 1:].split("/") \
             if topic.startswith(f"{self.prefix}/") else []
         async with self.request_lock:
+            if topic == self.topic("device/seasonal/set"):
+                self._set_pending_seasonal_percent(text)
+                return
+            if topic == self.topic("device/seasonal/enabled/set"):
+                self._set_pending_seasonal_disabled(text)
+                return
+            if topic == self.topic("device/rainoff/set"):
+                self._set_pending_rainoff(text)
+                return
+            if topic == self.topic("device/program/discard"):
+                self._discard_pending_device_settings()
+                return
+            if topic == self.topic("device/program/commit") \
+                    and not self._has_pending_device_settings():
+                self.log("Device settings have no pending changes")
+                return
             if len(suffix) == 4 and suffix[:1] == ["zone"] \
                     and suffix[2:] == ["manual_duration", "set"]:
                 self._set_manual_duration(int(suffix[1]), text)
@@ -678,26 +717,8 @@ class GalconMqttBridge:
                     await self._poll_programs()
                     self.log("Controller status and programs refreshed")
                     return
-                if topic == self.topic("device/seasonal/set"):
-                    value = int(text)
-                    if not 0 <= value <= 250:
-                        raise ValueError("seasonal adjustment must be 0-250")
-                    async with self.command_lock:
-                        await write_char(self.client, CHAR_VALVE,
-                                         build_seasonal_payload(value),
-                                         f"SEASONAL {value}%")
-                    self._publish("device/seasonal", value)
-                    retain_ble = True
-                    return
-                if topic == self.topic("device/rainoff/set"):
-                    value = int(text)
-                    if not 0 <= value <= 255:
-                        raise ValueError("rain-off days must be 0-255")
-                    async with self.command_lock:
-                        await write_char(self.client, CHAR_VALVE,
-                                         build_rainoff_payload(value),
-                                         f"RAIN OFF {value} days")
-                    self._publish("device/rainoff", value)
+                if topic == self.topic("device/program/commit"):
+                    await self._commit_pending_device_settings()
                     retain_ble = True
                     return
                 parts = topic.split("/")
@@ -781,6 +802,89 @@ class GalconMqttBridge:
             confirmed = await self._confirm_program_save(zone, updated)
             self.programs[zone] = confirmed
             self._publish_program(zone, confirmed)
+
+    def _set_pending_seasonal_percent(self, value):
+        value = int(value)
+        if not 0 <= value <= 250 or value % 10:
+            raise ValueError(
+                "seasonal adjustment must be 0-250 in 10% increments")
+        self.pending_seasonal_percent = value
+        self._publish("device/seasonal", value)
+        self._publish("device/seasonal/enabled",
+                      "OFF" if value == SEASONAL_DISABLED_PERCENT else "ON")
+        self.log(f"Seasonal adjustment pending: {value}%")
+
+    def _set_pending_seasonal_disabled(self, value):
+        normalized = str(value).strip().upper()
+        if normalized in ("OFF", "FALSE", "0"):
+            self._set_pending_seasonal_percent(SEASONAL_DISABLED_PERCENT)
+            return
+        if normalized not in ("ON", "TRUE", "1"):
+            raise ValueError("seasonal enabled accepts OFF only")
+        self._publish_device_setting_states()
+        self.log("Seasonal adjustment can only be enabled by setting a "
+                 "non-100% adjustment")
+
+    def _set_pending_rainoff(self, value):
+        value = int(value)
+        if not 0 <= value <= 255:
+            raise ValueError("rain-off days must be 0-255")
+        self.pending_rainoff_days = value
+        self._publish("device/rainoff", value)
+        self.log(f"Rain off pending: {value} days")
+
+    def _has_pending_device_settings(self):
+        return self.pending_seasonal_percent is not None \
+            or self.pending_rainoff_days is not None
+
+    def _publish_device_setting_states(self):
+        seasonal = (self.pending_seasonal_percent
+                    if self.pending_seasonal_percent is not None
+                    else self.seasonal_percent)
+        rainoff = (self.pending_rainoff_days
+                   if self.pending_rainoff_days is not None
+                   else self.rainoff_days)
+        self._publish("device/seasonal", seasonal)
+        self._publish(
+            "device/seasonal/enabled",
+            "OFF" if seasonal == SEASONAL_DISABLED_PERCENT else "ON")
+        self._publish("device/rainoff", rainoff)
+
+    def _discard_pending_device_settings(self):
+        had_changes = self._has_pending_device_settings()
+        self.pending_seasonal_percent = None
+        self.pending_rainoff_days = None
+        self._publish_device_setting_states()
+        self.log("Pending device settings "
+                 f"{'discarded' if had_changes else 'already clear'}")
+
+    async def _commit_pending_device_settings(self):
+        seasonal_changed = self.pending_seasonal_percent is not None
+        seasonal = (self.pending_seasonal_percent
+                    if self.pending_seasonal_percent is not None
+                    else self.seasonal_percent)
+
+        async with self.command_lock:
+            if seasonal_changed:
+                await write_char(
+                    self.client, CHAR_VALVE,
+                    build_seasonal_payload(seasonal),
+                    f"SEASONAL {seasonal}%")
+            if self.pending_rainoff_days is not None:
+                await write_char(
+                    self.client, CHAR_VALVE,
+                    build_rainoff_payload(self.pending_rainoff_days),
+                    f"RAIN OFF {self.pending_rainoff_days} days")
+
+        if seasonal_changed:
+            self.seasonal_percent = seasonal
+            self.seasonal_enabled = seasonal != SEASONAL_DISABLED_PERCENT
+        if self.pending_rainoff_days is not None:
+            self.rainoff_days = self.pending_rainoff_days
+        self.pending_seasonal_percent = None
+        self.pending_rainoff_days = None
+        self._publish_device_setting_states()
+        self.log("Pending device settings committed")
 
     def _set_pending_window_value(self, zone, window, field, value):
         if not 1 <= zone <= ZONE_COUNT:
@@ -1097,11 +1201,33 @@ class GalconMqttBridge:
                     self._publish(f"{pending}/{field}", "")
         self._discovery("number", "seasonal", "Seasonal adjustment",
                         "device/seasonal", "device/seasonal/set",
-                        {"min": 0, "max": 250, "step": 1, "unit_of_measurement": "%"}, device)
+                {"min": 0, "max": 250, "step": 10,
+                 "unit_of_measurement": "%"}, device)
+        self._discovery("switch", "seasonal_enabled",
+            "Seasonal adjustment enabled",
+                "device/seasonal/enabled",
+                "device/seasonal/enabled/set",
+                {"icon": "mdi:percent"}, device,
+                payload_on="ON", payload_off="OFF")
+        self.mqtt.publish(
+            f"homeassistant/binary_sensor/{self.prefix}/"
+            "seasonal_enabled/config",
+            "", qos=1, retain=True)
         self._discovery("number", "rainoff", "Rain off",
                         "device/rainoff", "device/rainoff/set",
                         {"min": 0, "max": 255, "step": 1,
                          "unit_of_measurement": "d"}, device)
+        self._discovery(
+            "button", "device_program_commit", "Apply device settings",
+            None, "device/program/commit",
+            {"icon": "mdi:content-save-check"}, device,
+            payload_press="commit")
+        self._discovery(
+            "button", "device_program_discard", "Discard device changes",
+            None, "device/program/discard",
+            {"icon": "mdi:undo-variant"}, device,
+            payload_press="discard")
+        self._publish_device_setting_states()
         # Clear the old single-zone entity from brokers that retained it.
         self.mqtt.publish(
             f"homeassistant/sensor/{self.prefix}/active_zone/config",

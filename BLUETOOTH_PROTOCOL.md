@@ -392,8 +392,14 @@ Example, 110%:
 ```
 
 The adjustment applies to all programmed durations at runtime; it does not
-change each zone's schedule record. Valid device limits have not been fully
-established.
+change each zone's schedule record. There is no separate enable flag:
+disabling in the official app writes `100%`, the neutral multiplier. Enabling
+again writes the selected percentage (observed as `110%`). Valid device limits
+have not been fully established.
+
+The current percentage is echoed in status byte 16 on `20900102`. Captured
+disable, enable, and subsequent edits produced `100`, `110`, `40`, `10`, and
+`30` in both the command's byte 7 and the following status byte 16.
 
 ### Rain Off
 
@@ -429,7 +435,7 @@ Example, suspend programs for 3 days:
   configurable window has not been confirmed by an isolated capture.
 - Schedule bytes 3 and 15-19 have no established meaning.
 - The status frame's battery field, if one exists, is unknown.
-- Seasonal adjustment and Rain Off have no confirmed read-back command.
+- Rain Off has no confirmed read-back command.
 - The complete weekday numbering convention for `20900104` is not confirmed.
 - PIN enforcement may vary by pairing/session state.
 - Handles can vary; use UUIDs unless decoding a capture from the tested unit.

@@ -146,7 +146,9 @@ MQTT Discovery creates:
   enabled window in that zone
 - Pending enable, hour, and minute inputs for four program windows per zone,
   with per-zone buttons to apply or discard all pending program values
-- Seasonal-adjustment and rain-off controls
+- Pending seasonal-adjustment percentage and rain-off controls, a
+  disable-only seasonal status switch, and device-level buttons to apply or
+  discard those changes
 - A status refresh button
 
 The default topic prefix is `galcon_gl6100`. Change it with `--prefix` when
@@ -158,8 +160,11 @@ running more than one bridge.
 galcon_gl6100/zone/1/set              ON, OFF, OPEN:5, or CLOSE
 galcon_gl6100/zone/1/manual_duration/set                  30
 galcon_gl6100/refresh                 any payload
-galcon_gl6100/device/seasonal/set     100
+galcon_gl6100/device/seasonal/set     110 (0-250 in increments of 10)
+galcon_gl6100/device/seasonal/enabled/set                 OFF (stages 100%)
 galcon_gl6100/device/rainoff/set      0
+galcon_gl6100/device/program/commit                         commit
+galcon_gl6100/device/program/discard                        discard
 galcon_gl6100/zone/1/program/set      {"duration": 15, "days": 127}
 galcon_gl6100/zone/1/program/set      {"window": 2, "enabled": true, "hour": 14, "minute": 30}
 galcon_gl6100/zone/1/program/pending/duration/set         15
@@ -170,6 +175,15 @@ galcon_gl6100/zone/1/program/pending/window/2/minute/set  30
 galcon_gl6100/zone/1/program/commit                         commit
 galcon_gl6100/zone/1/program/discard                        discard
 ```
+
+Seasonal adjustment has no separate BLE flag. The controller and official
+app represent disabled as a neutral `100%`. The Home Assistant switch reports
+`ON` for every other percentage and can only be turned `OFF`, which stages a
+`100%` adjustment. Enable seasonal adjustment by selecting a non-`100%`
+percentage; the switch does not choose a percentage itself. Seasonal values
+must be multiples of 10. Seasonal percentage and rain-off days remain pending
+until **Apply device settings** is pressed. **Discard device changes** restores
+their controller-backed values without a BLE connection.
 
 Set a zone's **Manual duration** before turning its zone switch on. A plain
 `ON` command uses that per-zone value (one minute by default); `OPEN:30`

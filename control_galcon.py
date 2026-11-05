@@ -126,7 +126,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 
 # Single source of truth for the version; setup_msi.py and the GUI read this.
-APP_VERSION = "1.2.36"
+APP_VERSION = "1.2.37"
 GITHUB_REPO = "nightime7/py-galcon-bt-control"
 
 # The GL6100 advertises under this name regardless of which physical unit
@@ -160,6 +160,8 @@ CHAR_PIN = "20900105-bdee-493a-aa74-a8137c9d43f0"
 CHAR_POLL = "20900106-bdee-493a-aa74-a8137c9d43f0"
 
 STATUS_POLL = bytes([0x02, 0x00])
+SEASONAL_DISABLED_PERCENT = 100
+DEFAULT_SEASONAL_PERCENT = 110
 
 # After closing one member of a pair, the surviving zone can briefly use this
 # compact single-zone form with its countdown in bytes 5-6.
@@ -284,6 +286,14 @@ def build_seasonal_payload(percent: int) -> bytes:
     frame[2] = 0x02
     frame[7] = percent & 0xFF
     return bytes(frame)
+
+
+def decode_seasonal_percent(status: bytes):
+    """Return the device-wide seasonal percentage from a status frame."""
+    if len(status) < 17:
+        return None
+    percent = status[16]
+    return percent if 0 <= percent <= 250 else None
 
 
 def build_rainoff_payload(days: int) -> bytes:
@@ -709,6 +719,13 @@ def decode_status(value: bytes, debug=False):
             mins, secs = divmod(total_seconds, 60)
             time_str = f"Zone {zone}: {mins:2d}m {secs:02d}s ({total_seconds:3d}s)"
             print(f"       ║ {time_str:<39}║")
+
+    seasonal_percent = decode_seasonal_percent(value)
+    if seasonal_percent is not None:
+        seasonal_state = ("off" if seasonal_percent ==
+                          SEASONAL_DISABLED_PERCENT else "on")
+        seasonal_str = f"Seasonal: {seasonal_percent}% ({seasonal_state})"
+        print(f"       ║ {seasonal_str:<39}║")
     
     print(f"       ╚{'═' * 40}╝")
     
@@ -716,6 +733,7 @@ def decode_status(value: bytes, debug=False):
         print(f"       [DEBUG] Raw hex: {hexdump(value)}")
         print(f"       [DEBUG] byte0={value[0]:#04x}, bytes[2:4]={value[2]:#04x} {value[3]:#04x}")
         print(f"       [DEBUG] byte10={value[10]:#04x} (not a confirmed battery indicator)")
+        print(f"       [DEBUG] byte16={value[16]:#04x} (seasonal percentage)")
 
 
 async def read_battery(client):

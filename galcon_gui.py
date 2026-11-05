@@ -26,6 +26,7 @@ from control_galcon import (
     GITHUB_REPO,
     NAME_HINT,
     REPAIR_HINT,
+    SEASONAL_DISABLED_PERCENT,
     SERVICE_UUID,
     STATUS_POLL,
     build_close_payload,
@@ -343,13 +344,18 @@ class GalconSession:
         for zone in sorted(records):
             await self.save_program(zone, records[zone])
 
-    async def set_seasonal(self, percent):
+    async def set_seasonal(self, percent, enabled=True):
         client = self._require_client()
         self.ui_queue.put(("busy", True))
         try:
-            await write_char(client, CHAR_VALVE, build_seasonal_payload(percent),
-                             f"SEASONAL ADJUSTMENT {percent}%", debug=self.debug)
-            self.log(f"[{ts()}] Seasonal adjustment set to {percent}%")
+            effective = percent if enabled else SEASONAL_DISABLED_PERCENT
+            await write_char(client, CHAR_VALVE,
+                             build_seasonal_payload(effective),
+                             f"SEASONAL ADJUSTMENT {effective}%",
+                             debug=self.debug)
+            state = "enabled" if enabled else "disabled"
+            self.log(f"[{ts()}] Seasonal adjustment {state} "
+                     f"({effective}%)")
         finally:
             self.ui_queue.put(("busy", False))
 
@@ -561,8 +567,11 @@ class MqttBridgeSession:
     async def close_zone(self, zone):
         await self._publish(f"zone/{zone}/set", "CLOSE")
 
-    async def set_seasonal(self, percent):
-        await self._publish("device/seasonal/set", str(percent))
+    async def set_seasonal(self, percent, enabled=True):
+        if enabled:
+            await self._publish("device/seasonal/set", str(percent))
+        else:
+            await self._publish("device/seasonal/enabled/set", "OFF")
 
     async def set_rainoff(self, days):
         await self._publish("device/rainoff/set", str(days))
@@ -778,8 +787,12 @@ class GalconGui(tk.Tk):
         ttk.Label(actions, text="Seasonal %").grid(row=1, column=0, sticky="e", padx=4, pady=4)
         self.seasonal_var = tk.IntVar(value=100)
         ttk.Spinbox(actions, from_=0, to=250, textvariable=self.seasonal_var, width=9).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        self.seasonal_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(actions, text="Enabled",
+                variable=self.seasonal_enabled_var).grid(
+                    row=1, column=2, padx=4, pady=4, sticky="w")
         self._connected_widget(ttk.Button(actions, text="Apply",
-                          command=self._set_seasonal)).grid(row=1, column=2, padx=4, pady=4, sticky="ew")
+                  command=self._set_seasonal)).grid(row=1, column=3, padx=4, pady=4, sticky="ew")
         ttk.Label(actions, text="Rain off days").grid(row=2, column=0, sticky="e", padx=4, pady=4)
         self.rainoff_var = tk.IntVar(value=0)
         ttk.Spinbox(actions, from_=0, to=99, textvariable=self.rainoff_var, width=9).grid(row=2, column=1, sticky="w", padx=4, pady=4)
@@ -1240,7 +1253,8 @@ class GalconGui(tk.Tk):
         self._connected_call(self.session.close_zone(zone))
 
     def _set_seasonal(self):
-        self._connected_call(self.session.set_seasonal(int(self.seasonal_var.get())))
+        self._connected_call(self.session.set_seasonal(
+            int(self.seasonal_var.get()), self.seasonal_enabled_var.get()))
 
     def _set_rainoff(self):
         self._connected_call(self.session.set_rainoff(int(self.rainoff_var.get())))

@@ -12,6 +12,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import galcon_mqtt as mqtt_module  # noqa: E402
+from control_galcon import (  # noqa: E402
+    SEASONAL_DISABLED_PERCENT,
+    build_rainoff_payload,
+    build_seasonal_payload,
+    decode_seasonal_percent,
+)
 from galcon_mqtt import (  # noqa: E402
     GalconMqttBridge,
     apply_program_changes,
@@ -28,6 +35,7 @@ class FakeBridge(GalconMqttBridge):
         self.ble_connect_calls = 0
         self.in_flight = 0
         self.max_in_flight = 0
+        self.ble_writes = []
 
     async def _ensure_ble_connected(self, load_programs=False):
         self.ble_connect_calls += 1
@@ -60,7 +68,20 @@ async def main():
     args = argparse.Namespace(prefix="test", keep_connected=False,
                               idle_grace=120)
     bridge = FakeBridge(args)
+
+    async def fake_write_char(_client, characteristic, payload, label,
+                              debug=False):
+        bridge.ble_writes.append((characteristic, payload, label))
+
+    mqtt_module.write_char = fake_write_char
     expected = []
+
+    seasonal = build_seasonal_payload(30)
+    assert seasonal == bytes.fromhex(
+        "000002000000001e000000000000000000000000")
+    status = bytearray(20)
+    status[16] = 30
+    assert decode_seasonal_percent(status) == 30
 
     for zone in range(1, 5):
         topic = f"test/zone/{zone}/set"
@@ -134,6 +155,24 @@ async def main():
         for topic, payload, _kwargs in bridge.mqtt.messages
         if topic.endswith("/config") and payload
     }
+    seasonal_enabled = discovery[
+        "homeassistant/switch/test/seasonal_enabled/config"]
+    assert seasonal_enabled["state_topic"] == \
+        "test/device/seasonal/enabled"
+    assert seasonal_enabled["command_topic"] == \
+        "test/device/seasonal/enabled/set"
+    assert any(
+        topic == "homeassistant/binary_sensor/test/seasonal_enabled/config"
+        and payload == ""
+        for topic, payload, _kwargs in bridge.mqtt.messages)
+    seasonal = discovery["homeassistant/number/test/seasonal/config"]
+    assert seasonal["step"] == 10
+    device_commit = discovery[
+        "homeassistant/button/test/device_program_commit/config"]
+    assert device_commit["command_topic"] == "test/device/program/commit"
+    device_discard = discovery[
+        "homeassistant/button/test/device_program_discard/config"]
+    assert device_discard["command_topic"] == "test/device/program/discard"
     for zone in range(1, 5):
         manual_duration_topic = (
             f"homeassistant/number/test/zone_{zone}_manual_duration/config")
@@ -188,6 +227,82 @@ async def main():
                 assert config["state_topic"] == pending
                 assert config["command_topic"] == f"{pending}/set"
                 assert "command_template" not in config
+
+    device_connects = bridge.ble_connect_calls
+    device_writes = len(bridge.ble_writes)
+    try:
+        await bridge._handle_mqtt("test/device/seasonal/set", b"31")
+        raise AssertionError("31% seasonal adjustment was accepted")
+    except ValueError as exc:
+        assert "10% increments" in str(exc)
+    await bridge._handle_mqtt("test/device/seasonal/set", b"30")
+    await bridge._handle_mqtt("test/device/rainoff/set", b"4")
+    assert bridge.ble_connect_calls == device_connects
+    assert len(bridge.ble_writes) == device_writes
+    assert bridge.pending_seasonal_percent == 30
+    assert bridge.pending_rainoff_days == 4
+    controller_status = bytearray(20)
+    controller_status[0] = 0xff
+    controller_status[16] = SEASONAL_DISABLED_PERCENT
+    bridge._publish_status(controller_status)
+    assert bridge.seasonal_enabled is False
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/device/seasonal"] == "30"
+    assert latest["test/device/seasonal/enabled"] == "ON"
+    assert latest["test/device/rainoff"] == "4"
+
+    await bridge._handle_mqtt("test/device/program/discard", b"discard")
+    assert bridge.ble_connect_calls == device_connects
+    assert len(bridge.ble_writes) == device_writes
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/device/seasonal"] == "100"
+    assert latest["test/device/seasonal/enabled"] == "OFF"
+    assert latest["test/device/rainoff"] == "0"
+
+    await bridge._handle_mqtt("test/device/seasonal/set", b"30")
+    await bridge._handle_mqtt("test/device/rainoff/set", b"4")
+    await bridge._handle_mqtt("test/device/program/commit", b"commit")
+    assert bridge.ble_connect_calls == device_connects + 1
+    assert bridge.ble_writes[-2][1] == build_seasonal_payload(30)
+    assert bridge.ble_writes[-1][1] == build_rainoff_payload(4)
+    assert bridge.seasonal_percent == 30
+    assert bridge.seasonal_enabled is True
+    assert bridge.rainoff_days == 4
+    assert not bridge._has_pending_device_settings()
+
+    await bridge._handle_mqtt(
+        "test/device/seasonal/enabled/set", b"OFF")
+    assert bridge.pending_seasonal_percent == 100
+    assert bridge.ble_connect_calls == device_connects + 1
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/device/seasonal"] == "100"
+    assert latest["test/device/seasonal/enabled"] == "OFF"
+    await bridge._handle_mqtt("test/device/program/discard", b"discard")
+    assert bridge.pending_seasonal_percent is None
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/device/seasonal"] == "30"
+    assert latest["test/device/seasonal/enabled"] == "ON"
+    await bridge._handle_mqtt(
+        "test/device/seasonal/enabled/set", b"ON")
+    assert bridge.pending_seasonal_percent is None
+
+    await bridge._handle_mqtt("test/device/seasonal/set", b"100")
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/device/seasonal/enabled"] == "OFF"
+    await bridge._handle_mqtt("test/device/program/commit", b"commit")
+    assert bridge.ble_writes[-1][1] == build_seasonal_payload(100)
+    assert bridge.seasonal_percent == 100
+    assert bridge.seasonal_enabled is False
 
     before_pending = bridge.ble_connect_calls
     await bridge._handle_mqtt(
