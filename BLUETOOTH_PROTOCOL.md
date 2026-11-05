@@ -88,15 +88,18 @@ Valve commands are 20-byte writes to `20900103`.
 |---:|---|---|
 | 0 | `0x00` | Open-command discriminator. |
 | 1 | `0x80 \| zone` | Set bit 7 and place zone number 1-4 in bits 0-2. |
-| 2-3 | `0x00` | Reserved; write zero. |
-| 4 | `minutes` | Automatic close duration in whole minutes, wire range 0-255. |
-| 5-19 | `0x00` | Reserved; write zero. |
+| 2 | `0x00` | Reserved; write zero. |
+| 3 | Hours | Automatic close duration hours component. |
+| 4 | Minutes | Automatic close duration minutes component, 0-59. |
+| 5 | Seconds | Automatic close duration seconds component, currently written as zero. |
+| 6-19 | `0x00` | Reserved; write zero. |
 
 Formula:
 
 ```text
 byte1 = 0x80 | zone
-byte4 = duration_minutes & 0xff
+byte3, byte4 = divmod(duration_minutes, 60)
+byte5 = 0
 ```
 
 | Zone | Byte 1 |
@@ -172,8 +175,60 @@ The nibble values must each be 0-3 and must differ.
 | Pair, second/low-nibble zone | 5 | 6 | `byte5 * 60 + byte6` |
 | Transitional (`0x0f`-`0x3f`) | 5 | 6 | `byte5 * 60 + byte6` |
 
-Other status bytes are not decoded. In particular, byte 10 is not a confirmed
-battery percentage.
+### Battery Fields
+
+Bytes 10-11 form a little-endian raw ADC level. This value is not a battery
+percentage and must not be presented as volts:
+
+```text
+battery_raw = (status[11] << 8) | status[10]
+input_class = 18 V if status[1] bit 6 is set, otherwise 9 V
+```
+
+The official-app analysis reported these low-battery rules:
+
+```text
+9 V input:  battery_raw <= 3123
+18 V input: battery_raw <= 2947
+```
+
+The raw field layout is verified on the tested 9 V controller. Three fresh
+polls produced `3674`, `3679`, and `3681` counts (`5a 0e`, `5f 0e`, and
+`61 0e`) while an older captured frame produced `3947` (`6b 0f`). The small
+short-term spread is consistent with raw ADC sampling, and bit 6 was clear on
+the 9 V unit. The exact warning boundaries and the 18 V branch come from
+independent official-app analysis and have not yet been crossed or exercised
+on the tested hardware.
+
+### Additional Device Fields
+
+| Byte | Field | Decoding | Confidence |
+|---:|---|---|---|
+| 9, bit 0 | Sensor wet | Boolean | Reported; no wet transition captured |
+| 9, bit 1 | Master open | Boolean | Reported; no master transition captured |
+| 9, bit 2 | Fertilizer active | Boolean | Reported; no fertilizer transition captured |
+| 9, bit 3 | AC status flag | Boolean | Reported; exact semantics unresolved |
+| 12 | Rain-off days remaining | Unsigned integer | Live-confirmed, `0 -> 1 -> 0` |
+| 13, bits 0-2 | Valve count | Lookup table below | Corroborated: reports 4 on the DC4 unit |
+| 13, bit 3 | Supply type | Set = DC, clear = AC | Corroborated: reports DC on the DC4 unit |
+| 14 | Firmware version | Unsigned integer | Reported; tested unit returns `47` |
+| 15 | Signal strength | Signed 8-bit dBm | Corroborated against BLE RSSI |
+| 16 | Water budget / seasonal adjustment | Raw percentage | Live-confirmed |
+
+Valve-count lookup, indexed by the numeric value of bits 0-2:
+
+```text
+0 -> 0, 1 -> 1, 2 -> 2, 3 -> 4,
+4 -> 6, 5 -> 9, 6 -> 12, 7 -> 12
+```
+
+The tested frame's byte 13 is `0x1b`: low bits `3` map to four valves and
+bit 3 reports DC, matching the GL6100 DC4 hardware. Byte 15 varied around
+`0xb2`-`0xba` (`-78` to `-70` dBm), consistent with scanner RSSI readings.
+Byte 9 remained `0x08` throughout testing, so its individual accessory flags
+are exposed as disabled-by-default diagnostics rather than confirmed states.
+Bit 7 of byte 1 was described as a power-rating flag but its value mapping is
+not established, so it is not decoded.
 
 ### Status Poll Order
 
@@ -372,8 +427,8 @@ by the controller, even though the BLE write itself reported success.
 
 ## Device-Wide Settings
 
-These are 20-byte writes to `20900103`. They appear to be write-only; no
-confirmed read-back mechanism is known.
+These are 20-byte writes to `20900103`. Their current values are echoed in
+the status frame: rain-off days in byte 12 and seasonal adjustment in byte 16.
 
 ### Seasonal Adjustment
 
@@ -417,6 +472,9 @@ Example, suspend programs for 3 days:
 00 00 01 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
+Readback is live-confirmed. Setting one rain-off day changed status byte 12
+from `0` to `1`; clearing rain-off changed it back to `0`.
+
 ## Notifications, Timing, And Caching
 
 | Situation | Required handling |
@@ -434,8 +492,10 @@ Example, suspend programs for 3 days:
 - Bytes 11-12 in schedule records are mode-dependent internal fields. A fourth
   configurable window has not been confirmed by an isolated capture.
 - Schedule bytes 3 and 15-19 have no established meaning.
-- The status frame's battery field, if one exists, is unknown.
-- Rain Off has no confirmed read-back command.
+- The battery raw field is confirmed, but the reported warning thresholds and
+  18 V input branch still need live boundary testing.
+- Status byte 9 accessory flags and byte 1 bit 7 power-rating semantics need
+  isolated hardware transitions before they can be considered confirmed.
 - The complete weekday numbering convention for `20900104` is not confirmed.
 - PIN enforcement may vary by pairing/session state.
 - Handles can vary; use UUIDs unless decoding a capture from the tested unit.
@@ -448,6 +508,8 @@ Example, suspend programs for 3 days:
 | Close zone 1 | `01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` |
 | Open zone 2, 7 min | `00 82 00 00 07 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` |
 | Open zone 3, 2 min | `00 83 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` |
+| Open zone 4, 1h05m | `00 84 00 01 05 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` |
+| Close zone 4 | `04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00` |
 | Rain Off, 3 days | `00 00 01 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00 00 00` |
 | Seasonal adjustment, 110% | `00 00 02 00 00 00 00 6e 00 00 00 00 00 00 00 00 00 00 00 00` |
 | Weekly zone 2, 1h, all days, 07:00 | `02 01 00 00 7f 07 00 ff 00 ff 00 ff 00 80 00 00 00 00 00 00` |

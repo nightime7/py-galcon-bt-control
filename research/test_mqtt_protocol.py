@@ -17,6 +17,8 @@ from control_galcon import (  # noqa: E402
     SEASONAL_DISABLED_PERCENT,
     build_rainoff_payload,
     build_seasonal_payload,
+    decode_battery_status,
+    decode_device_status_details,
     decode_seasonal_percent,
 )
 from galcon_mqtt import (  # noqa: E402
@@ -82,6 +84,10 @@ async def main():
     status = bytearray(20)
     status[16] = 30
     assert decode_seasonal_percent(status) == 30
+    live_status = bytes.fromhex(
+        "ff0000000000000000085a0e001b2fb71e000027")
+    assert decode_battery_status(live_status) == (3674, 9, 3123, False)
+    assert decode_device_status_details(live_status)["valve_count"] == 4
 
     for zone in range(1, 5):
         topic = f"test/zone/{zone}/set"
@@ -111,6 +117,10 @@ async def main():
         2, "OPEN:45", 30)
     assert override_minutes == 45
     assert override_payload[4] == 45
+    long_payload, long_minutes = build_zone_command_payload(
+        2, "OPEN:125", 30)
+    assert long_minutes == 125
+    assert long_payload[3:6] == b"\x02\x05\x00"
 
     record = bytes.fromhex(
         "01000f007f06001e00ff00ff0080000000000000")
@@ -167,6 +177,27 @@ async def main():
         for topic, payload, _kwargs in bridge.mqtt.messages)
     seasonal = discovery["homeassistant/number/test/seasonal/config"]
     assert seasonal["step"] == 10
+    battery_raw = discovery[
+        "homeassistant/sensor/test/battery_raw/config"]
+    assert battery_raw["state_topic"] == "test/battery/raw"
+    assert battery_raw["unit_of_measurement"] == "counts"
+    assert battery_raw["json_attributes_topic"] == "test/battery/details"
+    battery_low = discovery[
+        "homeassistant/binary_sensor/test/battery_low/config"]
+    assert battery_low["state_topic"] == "test/battery/low"
+    assert battery_low["device_class"] == "battery"
+    firmware = discovery[
+        "homeassistant/sensor/test/firmware_version/config"]
+    assert firmware["name"] == "Status byte 14"
+    assert firmware["enabled_by_default"] is False
+    signal = discovery[
+        "homeassistant/sensor/test/signal_strength/config"]
+    assert signal["state_topic"] == "test/device/signal_strength"
+    assert signal["device_class"] == "signal_strength"
+    sensor_wet = discovery[
+        "homeassistant/binary_sensor/test/sensor_wet/config"]
+    assert sensor_wet["enabled_by_default"] is False
+    assert sensor_wet["device_class"] == "moisture"
     device_commit = discovery[
         "homeassistant/button/test/device_program_commit/config"]
     assert device_commit["command_topic"] == "test/device/program/commit"
@@ -241,8 +272,7 @@ async def main():
     assert len(bridge.ble_writes) == device_writes
     assert bridge.pending_seasonal_percent == 30
     assert bridge.pending_rainoff_days == 4
-    controller_status = bytearray(20)
-    controller_status[0] = 0xff
+    controller_status = bytearray(live_status)
     controller_status[16] = SEASONAL_DISABLED_PERCENT
     bridge._publish_status(controller_status)
     assert bridge.seasonal_enabled is False
@@ -252,6 +282,26 @@ async def main():
     assert latest["test/device/seasonal"] == "30"
     assert latest["test/device/seasonal/enabled"] == "ON"
     assert latest["test/device/rainoff"] == "4"
+    assert latest["test/battery/raw"] == "3674"
+    assert latest["test/battery/low"] == "OFF"
+    assert latest["test/battery/input_voltage"] == "9"
+    assert latest["test/device/valve_count"] == "4"
+    assert latest["test/device/supply_type"] == "DC"
+    assert latest["test/device/firmware_version"] == "47"
+    assert latest["test/device/signal_strength"] == "-73"
+    assert latest["test/device/sensor_wet"] == "OFF"
+    assert latest["test/device/ac_present"] == "ON"
+    assert json.loads(latest["test/battery/details"]) == {
+        "input_voltage_class": 9,
+        "low_threshold": 3123,
+    }
+    low_status = bytearray(controller_status)
+    low_status[10:12] = (3123).to_bytes(2, "little")
+    bridge._publish_status(low_status)
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert latest["test/battery/low"] == "ON"
 
     await bridge._handle_mqtt("test/device/program/discard", b"discard")
     assert bridge.ble_connect_calls == device_connects
@@ -262,6 +312,15 @@ async def main():
     assert latest["test/device/seasonal"] == "100"
     assert latest["test/device/seasonal/enabled"] == "OFF"
     assert latest["test/device/rainoff"] == "0"
+
+    rain_status = bytearray(controller_status)
+    rain_status[12] = 1
+    bridge._publish_status(rain_status)
+    latest = {
+        topic: payload for topic, payload, _kwargs in bridge.mqtt.messages
+    }
+    assert bridge.rainoff_days == 1
+    assert latest["test/device/rainoff"] == "1"
 
     await bridge._handle_mqtt("test/device/seasonal/set", b"30")
     await bridge._handle_mqtt("test/device/rainoff/set", b"4")
@@ -398,7 +457,7 @@ async def main():
     print("Home Assistant window controls: 48 discovery entities")
     print("Home Assistant weekday controls: 28 discovery entities")
     print("Home Assistant duration controls: 4 number entities")
-    print("Manual ON duration: per-zone value encoded in BLE byte 4")
+    print("Manual ON duration: per-zone value encoded in BLE bytes 3-5")
     print("Pending duration/day/window edits: staged until zone commit")
     print("Discard pending changes: restores pre-edit values without BLE")
     print("Singles: zones 1, 2, 3, 4")

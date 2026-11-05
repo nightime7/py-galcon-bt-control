@@ -17,7 +17,7 @@ VALVE CONTROL (20900103) is a 20-byte frame:
 
     OPEN:  byte0 = 0x00 (fixed)
            byte1 = 0x80 | zone   (zone 1 -> 0x81, zone 2 -> 0x82, zone 3 -> 0x83, zone 4 -> 0x84)
-           byte4 = duration in whole minutes
+            bytes3-5 = duration hours, minutes, seconds
            remaining bytes 0x00
     CLOSE: byte0 = zone (1-4)
            remaining bytes 0x00
@@ -126,7 +126,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 
 # Single source of truth for the version; setup_msi.py and the GUI read this.
-APP_VERSION = "1.2.37"
+APP_VERSION = "1.2.38"
 GITHUB_REPO = "nightime7/py-galcon-bt-control"
 
 # The GL6100 advertises under this name regardless of which physical unit
@@ -162,6 +162,10 @@ CHAR_POLL = "20900106-bdee-493a-aa74-a8137c9d43f0"
 STATUS_POLL = bytes([0x02, 0x00])
 SEASONAL_DISABLED_PERCENT = 100
 DEFAULT_SEASONAL_PERCENT = 110
+# Reported from official-app analysis. The raw LE16 field is live-verified;
+# the threshold boundaries and 18 V branch still need hardware confirmation.
+BATTERY_LOW_THRESHOLD_9V = 3123
+BATTERY_LOW_THRESHOLD_18V = 2947
 
 # After closing one member of a pair, the surviving zone can briefly use this
 # compact single-zone form with its countdown in bytes 5-6.
@@ -259,12 +263,14 @@ def build_open_payload(zone: int, minutes: int) -> bytes:
 
         byte0 = 0x00
         byte1 = 0x80 | zone
-        byte4 = minutes
+        bytes3-5 = duration hours, minutes, seconds
     """
+    hours, remaining_minutes = divmod(minutes, 60)
     frame = bytearray(20)
     frame[0] = 0x00
     frame[1] = 0x80 | zone
-    frame[4] = minutes
+    frame[3] = hours
+    frame[4] = remaining_minutes
     return bytes(frame)
 
 
@@ -294,6 +300,37 @@ def decode_seasonal_percent(status: bytes):
         return None
     percent = status[16]
     return percent if 0 <= percent <= 250 else None
+
+
+def decode_battery_status(status: bytes):
+    """Return raw ADC level, input class, low threshold, and low state."""
+    if len(status) < 12:
+        return None
+    level = int.from_bytes(status[10:12], "little")
+    input_volts = 18 if status[1] & 0x40 else 9
+    threshold = (BATTERY_LOW_THRESHOLD_18V if input_volts == 18
+                 else BATTERY_LOW_THRESHOLD_9V)
+    return level, input_volts, threshold, level <= threshold
+
+
+def decode_device_status_details(status: bytes):
+    """Decode controller-wide diagnostic fields from the status frame."""
+    if len(status) < 17:
+        return None
+    flags = status[9]
+    valve_counts = (0, 1, 2, 4, 6, 9, 12, 12)
+    return {
+        "sensor_wet": bool(flags & 0x01),
+        "master_open": bool(flags & 0x02),
+        "fertilizer": bool(flags & 0x04),
+        "ac_present": bool(flags & 0x08),
+        "rainoff_days": status[12],
+        "valve_count": valve_counts[status[13] & 0x07],
+        "supply_type": "DC" if status[13] & 0x08 else "AC",
+        "firmware_version": status[14],
+        "signal_strength": status[15] - 256 if status[15] >= 128
+        else status[15],
+    }
 
 
 def build_rainoff_payload(days: int) -> bytes:
@@ -691,9 +728,9 @@ def decode_status(value: bytes, debug=False):
     bytes[2:3] count down in whole seconds while active; bytes[2:4]
     together are [minutes][seconds] remaining.
 
-    byte10 is not a reliable battery indicator - it changes too quickly
-    between short runs to be a battery percentage. The actual battery
-    indicator byte, if any, is unidentified.
+    bytes 10-11 are a little-endian raw battery ADC level. This is not a
+    percentage or a voltage measurement. Bit 6 of byte 1 selects the
+    controller's 9 V or 18 V input class and its low-battery threshold.
     """
     if len(value) < 20:
         return
@@ -726,13 +763,20 @@ def decode_status(value: bytes, debug=False):
                           SEASONAL_DISABLED_PERCENT else "on")
         seasonal_str = f"Seasonal: {seasonal_percent}% ({seasonal_state})"
         print(f"       ║ {seasonal_str:<39}║")
+
+    battery = decode_battery_status(value)
+    if battery is not None:
+        level, input_volts, threshold, is_low = battery
+        battery_str = (f"Battery: {level} raw ({input_volts} V, "
+                       f"{'LOW' if is_low else 'OK'})")
+        print(f"       ║ {battery_str:<39}║")
     
     print(f"       ╚{'═' * 40}╝")
     
     if debug:
         print(f"       [DEBUG] Raw hex: {hexdump(value)}")
         print(f"       [DEBUG] byte0={value[0]:#04x}, bytes[2:4]={value[2]:#04x} {value[3]:#04x}")
-        print(f"       [DEBUG] byte10={value[10]:#04x} (not a confirmed battery indicator)")
+        print(f"       [DEBUG] battery raw={level}, low threshold={threshold}")
         print(f"       [DEBUG] byte16={value[16]:#04x} (seasonal percentage)")
 
 
@@ -757,6 +801,13 @@ async def read_battery(client):
     print("\n       Position breakdown (all values in hex):")
     for i, b in enumerate(value):
         print(f"         byte{i:2d}: 0x{b:02x}  ({b:3d} decimal)")
+    battery = decode_battery_status(value)
+    if battery is not None:
+        level, input_volts, threshold, is_low = battery
+        print(f"\n       Battery raw level: {level} ADC counts")
+        print(f"       Input class: {input_volts} V")
+        print(f"       Low threshold: {threshold} counts")
+        print(f"       Battery state: {'LOW' if is_low else 'OK'}")
     return value
 
 

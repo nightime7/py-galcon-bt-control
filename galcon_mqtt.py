@@ -61,6 +61,8 @@ from control_galcon import (
     build_rainoff_payload,
     build_seasonal_payload,
     decode_active_zones,
+    decode_battery_status,
+    decode_device_status_details,
     decode_seasonal_percent,
     find_device,
     load_saved_mac,
@@ -644,6 +646,31 @@ class GalconMqttBridge:
                 self._publish("device/seasonal", self.seasonal_percent)
                 self._publish("device/seasonal/enabled",
                               "ON" if self.seasonal_enabled else "OFF")
+        battery = decode_battery_status(value)
+        if battery is not None:
+            level, input_volts, threshold, is_low = battery
+            self._publish("battery/raw", level)
+            self._publish("battery/low", "ON" if is_low else "OFF")
+            self._publish("battery/input_voltage", input_volts)
+            self._publish("battery/details", json.dumps({
+                "input_voltage_class": input_volts,
+                "low_threshold": threshold,
+            }))
+        details = decode_device_status_details(value)
+        if details is not None:
+            self.rainoff_days = details["rainoff_days"]
+            if self.pending_rainoff_days is None:
+                self._publish("device/rainoff", self.rainoff_days)
+            self._publish("device/valve_count", details["valve_count"])
+            self._publish("device/supply_type", details["supply_type"])
+            self._publish(
+                "device/firmware_version", details["firmware_version"])
+            self._publish("device/signal_strength",
+                          details["signal_strength"])
+            for flag in ("sensor_wet", "master_open", "fertilizer",
+                         "ac_present"):
+                self._publish(
+                    f"device/{flag}", "ON" if details[flag] else "OFF")
         self._publish("last_update", utc_now())
         self._publish("error", "", retain=True)
 
@@ -1118,6 +1145,60 @@ class GalconMqttBridge:
                 None, {"icon": "mdi:valve"}, device)
         self._discovery("sensor", "last_update", "Last update", "last_update",
                         "last_update", {}, device)
+        self._discovery(
+            "sensor", "battery_raw", "Battery raw level", "battery/raw",
+            None, {"icon": "mdi:battery", "unit_of_measurement": "counts",
+                   "state_class": "measurement",
+                   "entity_category": "diagnostic",
+                   "json_attributes_topic": self.topic("battery/details")},
+            device)
+        self._discovery(
+            "binary_sensor", "battery_low", "Battery low", "battery/low",
+            None, {"device_class": "battery", "payload_on": "ON",
+                   "payload_off": "OFF",
+                   "entity_category": "diagnostic"}, device)
+        self._discovery(
+            "sensor", "battery_input_voltage", "Controller input class",
+            "battery/input_voltage", None,
+            {"device_class": "voltage", "unit_of_measurement": "V",
+             "entity_category": "diagnostic"}, device)
+        self._discovery(
+            "sensor", "valve_count", "Valve count", "device/valve_count",
+            None, {"icon": "mdi:valve",
+                   "entity_category": "diagnostic"}, device)
+        self._discovery(
+            "sensor", "supply_type", "Controller supply type",
+            "device/supply_type", None,
+            {"icon": "mdi:current-dc",
+             "entity_category": "diagnostic"}, device)
+        self._discovery(
+            "sensor", "firmware_version", "Status byte 14",
+            "device/firmware_version", None,
+            {"icon": "mdi:chip", "entity_category": "diagnostic",
+             "enabled_by_default": False}, device)
+        self._discovery(
+            "sensor", "signal_strength", "Controller signal strength",
+            "device/signal_strength", None,
+            {"device_class": "signal_strength",
+             "unit_of_measurement": "dBm", "state_class": "measurement",
+             "entity_category": "diagnostic"}, device)
+        for object_id, name, icon, device_class in (
+                ("sensor_wet", "Sensor wet", "mdi:water", "moisture"),
+                ("master_open", "Master valve open", "mdi:valve-open", None),
+                ("fertilizer", "Fertilizer active", "mdi:sprout", None),
+                ("ac_present", "AC status flag", "mdi:power-plug", None)):
+            fields = {
+                "icon": icon,
+                "entity_category": "diagnostic",
+                "enabled_by_default": False,
+                "payload_on": "ON",
+                "payload_off": "OFF",
+            }
+            if device_class is not None:
+                fields["device_class"] = device_class
+            self._discovery(
+                "binary_sensor", object_id, name, f"device/{object_id}",
+                None, fields, device)
         self._discovery("button", "refresh", "Update Status", None,
                 "refresh", {"icon": "mdi:refresh"}, device,
                 payload_press="refresh")

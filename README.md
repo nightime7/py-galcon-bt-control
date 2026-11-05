@@ -7,6 +7,14 @@ day-to-day operation.
 The BLE protocol was reverse-engineered from Android HCI captures. This
 project is not affiliated with or endorsed by Galcon.
 
+## Acknowledgments
+
+Special thanks to [@Mitamar06](https://github.com/Mitamar06) for contributing
+the battery and additional status-field decoding documented in
+[issue #1](https://github.com/nightime7/py-galcon-bt-control/issues/1). The
+worked protocol examples substantially accelerated the Home Assistant
+diagnostic support added in version 1.2.38.
+
 ## What Is Included
 
 - `GalconControlGUI.exe` / `galcon_gui.py`: desktop control, live status,
@@ -139,6 +147,14 @@ containing broker credentials.
 MQTT Discovery creates:
 
 - Controller connection, status, active-zone, and last-update sensors
+- Raw battery ADC level and a low-battery diagnostic; the raw value is not a
+  percentage or voltage measurement
+- Diagnostic entities for controller input class, valve count, DC/AC supply
+  type, BLE signal strength, and disabled-by-default status byte 14; the byte
+  is reported as firmware by independent analysis but is not locally verified
+- Disabled-by-default diagnostic flags for sensor wet, master valve,
+  fertilizer, and AC status; these accessory meanings still need isolated
+  transition testing
 - A manual on/off switch, duration input, and remaining-time sensor for each
   zone
 - Program mode, next-run, and pending duration input for each zone
@@ -153,6 +169,17 @@ MQTT Discovery creates:
 
 The default topic prefix is `galcon_gl6100`. Change it with `--prefix` when
 running more than one bridge.
+
+The battery sensor publishes the controller's raw 16-bit ADC count. Home
+Assistant also receives a **Battery low** binary sensor using the controller
+input class and the official-app thresholds (`3123` for 9 V, `2947` for
+18 V). These thresholds are externally derived and still need live boundary
+testing on this hardware; no percentage estimate is fabricated.
+
+Rain-off days are synchronized from controller status byte 12. The seasonal
+adjustment entity is the controller's water-budget percentage from status byte
+16. Manual run durations are encoded as hours/minutes/seconds on the wire;
+the MQTT input remains a whole-minute value.
 
 ### MQTT Commands
 

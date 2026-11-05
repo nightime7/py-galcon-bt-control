@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.38 - 2026-11-06
+
+### Added
+
+- Added Home Assistant entities for raw battery ADC level and low-battery
+  state.
+- Added decoding for the little-endian battery field in status bytes 10-11
+  and the 9 V/18 V input class in status byte 1.
+- Added controller diagnostics for rain-off readback, valve count, supply
+  type, signal strength, status byte 14, and accessory status flags. Fields
+  without locally verified semantics are disabled by default.
+- Documented live battery samples and the remaining threshold-validation
+  caveat.
+- Thanks to [@Mitamar06](https://github.com/Mitamar06) for contributing the
+  battery and additional status-field decoding in
+  [issue #1](https://github.com/nightime7/py-galcon-bt-control/issues/1).
+
+### Fixed
+
+- Encoded manual run durations as hours/minutes/seconds in command bytes 3-5
+  so durations over 59 minutes no longer wrap into a single minutes byte.
+- Synchronized rain-off days from confirmed status byte 12 readback.
+
 ## 1.2.37 - 2026-11-06
 
 ### Added
